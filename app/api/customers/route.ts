@@ -12,8 +12,8 @@ export async function POST(req: Request) {
   if (!b.firstName || !b.lastName) return NextResponse.json({ error: 'First and last name are required.' }, { status: 400 })
   const sql = getSql()
   const [row] = await sql<{ id: string }[]>`
-    insert into customers (first_name, last_name, dob, email, phone, state, plan, pay_channel, cdl, license_no, dot, sub_status, next_payment, agent_id)
-    values (${b.firstName}, ${b.lastName}, ${b.dob || null}, ${b.email || null}, ${b.phone || null}, ${b.state || null},
+    insert into customers (legacy_member_id, first_name, last_name, dob, email, phone, state, plan, pay_channel, cdl, license_no, dot, sub_status, next_payment, agent_id)
+    values (${'M-' + Math.floor(1000 + Math.random()*9000)}, ${b.firstName}, ${b.lastName}, ${b.dob || null}, ${b.email || null}, ${b.phone || null}, ${b.state || null},
             ${b.plan || null}, ${b.payChannel || null}, ${b.cdl || 'No'}, ${b.licenseNo || null}, ${b.dot || 'No'},
             ${b.subStatus || 'Active'}, ${b.nextPayment || null}, ${b.agentId || null})
     returning id`

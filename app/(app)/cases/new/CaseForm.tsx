@@ -1,49 +1,58 @@
 'use client'
 import { useRouter } from 'next/navigation'
 import { useState } from 'react'
-
-type Customer = { id: string; first_name: string; last_name: string }
-
+type Customer = { id: string; first_name: string; last_name: string; legacy_member_id?: string | null }
 export default function CaseForm({ customers, agents }: { customers: Customer[]; agents: { id: string; name: string }[] }) {
   const router = useRouter()
-  const [form, setForm] = useState({
-    customerId: customers[0]?.id || '', citation: '', court: '', state: '',
-    status: 'New', priority: 'Normal', fee: '', fine: '', agentId: agents[0]?.id || '',
-  })
+  const [f, setF] = useState({ customerId: customers[0]?.id || '', citation: '', officialNo: '', ticket: '', state: '', court: '', violationDate: '', cmv: 'Unknown', cdl: 'Unknown', fine: '', fee: '', agentId: '', priority: 'Normal', status: 'New' })
   const [error, setError] = useState('')
-  const set = (k: string, v: string) => setForm((f) => ({ ...f, [k]: v }))
-
+  const set = (k: string, v: string) => setF((s) => ({ ...s, [k]: v }))
   async function submit(e: React.FormEvent) {
     e.preventDefault(); setError('')
-    if (!form.customerId) { setError('Select a customer.'); return }
-    const res = await fetch('/api/cases', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(form) })
-    if (res.ok) { router.push('/cases'); router.refresh() }
-    else { const d = await res.json().catch(() => ({})); setError(d.error || 'Could not save.') }
+    if (!f.customerId) { setError('Select a customer.'); return }
+    const res = await fetch('/api/cases', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(f) })
+    if (res.ok) { router.push('/cases'); router.refresh() } else { const d = await res.json().catch(()=>({})); setError(d.error || 'Could not save.') }
   }
-
+  const custName = customers.find((c) => c.id === f.customerId)
   return (
-    <div className="max-w-2xl">
-      <h1 className="text-xl font-semibold text-slate-900">New case</h1>
-      {error && <p className="mt-3 rounded bg-rose-50 px-3 py-2 text-sm text-rose-700">{error}</p>}
-      {customers.length === 0 && <p className="mt-3 rounded bg-amber-50 px-3 py-2 text-sm text-amber-700">Add a customer first.</p>}
-      <form onSubmit={submit} className="mt-4 grid grid-cols-1 gap-4 rounded-xl border border-slate-200 bg-white p-5 sm:grid-cols-2">
-        <div className="sm:col-span-2"><label className="block text-sm font-medium text-slate-700">Customer *</label>
-          <select value={form.customerId} onChange={(e) => set('customerId', e.target.value)} className="mt-1 w-full rounded-lg border-slate-300 text-sm">
-            {customers.map((c) => <option key={c.id} value={c.id}>{c.first_name} {c.last_name}</option>)}
-          </select></div>
-        <div><label className="block text-sm font-medium text-slate-700">Citation #</label><input value={form.citation} onChange={(e) => set('citation', e.target.value)} className="mt-1 w-full rounded-lg border-slate-300 text-sm" /></div>
-        <div><label className="block text-sm font-medium text-slate-700">Court</label><input value={form.court} onChange={(e) => set('court', e.target.value)} className="mt-1 w-full rounded-lg border-slate-300 text-sm" /></div>
-        <div><label className="block text-sm font-medium text-slate-700">State</label><input value={form.state} onChange={(e) => set('state', e.target.value)} className="mt-1 w-full rounded-lg border-slate-300 text-sm" /></div>
-        <div><label className="block text-sm font-medium text-slate-700">Status</label>
-          <select value={form.status} onChange={(e) => set('status', e.target.value)} className="mt-1 w-full rounded-lg border-slate-300 text-sm">
-            <option>New</option><option>Action Required</option><option>Hearing Scheduled</option><option>Waiting for Court</option><option>Resolved</option><option>Dismissed</option>
-          </select></div>
-        <div><label className="block text-sm font-medium text-slate-700">Customer fee ($) — what you charge</label><input type="number" step="0.01" value={form.fee} onChange={(e) => set('fee', e.target.value)} className="mt-1 w-full rounded-lg border-slate-300 text-sm" placeholder="e.g. 500" /></div>
-        <div><label className="block text-sm font-medium text-slate-700">Court fine ($)</label><input type="number" step="0.01" value={form.fine} onChange={(e) => set('fine', e.target.value)} className="mt-1 w-full rounded-lg border-slate-300 text-sm" /></div>
-        <div><label className="block text-sm font-medium text-slate-700">Assigned agent</label><select value={form.agentId} onChange={(e)=>set('agentId',e.target.value)} className="mt-1 w-full rounded-lg border-slate-300 text-sm">{agents.length===0 && <option value="">— none —</option>}{agents.map((a)=><option key={a.id} value={a.id}>{a.name}</option>)}</select></div>
-        <div className="sm:col-span-2 flex justify-end gap-2">
-          <button type="button" onClick={() => router.push('/cases')} className="rounded-lg bg-white px-4 py-2 text-sm font-semibold text-slate-700 ring-1 ring-slate-300">Cancel</button>
-          <button className="rounded-lg bg-brand-600 px-4 py-2 text-sm font-semibold text-white hover:bg-brand-700">Create case</button>
+    <div className="max-w-4xl">
+      <button onClick={() => router.push('/cases')} className="text-sm text-brand-600">← Back</button>
+      <h1 className="mt-1 text-xl font-bold text-slate-900">New case{custName ? ` for ${custName.first_name} ${custName.last_name}` : ''}</h1>
+      {error && <p className="mt-3 rounded-lg bg-rose-50 px-3 py-2 text-sm text-rose-700">{error}</p>}
+      {customers.length === 0 && <p className="mt-3 rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-700">Add a customer first.</p>}
+      <form onSubmit={submit} className="mt-4 space-y-4">
+        <div className="card p-5">
+          <p className="mb-3 text-[11px] font-bold uppercase tracking-wider text-brand-600">Customer &amp; Identifiers</p>
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+            <div><span className="lbl">Customer *</span><select value={f.customerId} onChange={(e)=>set('customerId',e.target.value)} className="inp">{customers.map((c)=><option key={c.id} value={c.id}>{c.first_name} {c.last_name}{c.legacy_member_id?` (${c.legacy_member_id})`:''}</option>)}</select></div>
+            <div><span className="lbl">Citation number *</span><input value={f.citation} onChange={(e)=>set('citation',e.target.value)} className="inp" placeholder="e.g. T00298403" /></div>
+            <div><span className="lbl">Official case #</span><input value={f.officialNo} onChange={(e)=>set('officialNo',e.target.value)} className="inp" /></div>
+            <div><span className="lbl">Ticket number</span><input value={f.ticket} onChange={(e)=>set('ticket',e.target.value)} className="inp" /></div>
+          </div>
+        </div>
+        <div className="card p-5">
+          <p className="mb-3 text-[11px] font-bold uppercase tracking-wider text-brand-600">Court &amp; Violation</p>
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+            <div><span className="lbl">State</span><input value={f.state} onChange={(e)=>set('state',e.target.value)} className="inp" /></div>
+            <div><span className="lbl">Court name</span><input value={f.court} onChange={(e)=>set('court',e.target.value)} className="inp" /></div>
+            <div><span className="lbl">Violation date</span><input type="date" value={f.violationDate} onChange={(e)=>set('violationDate',e.target.value)} className="inp" /></div>
+            <div><span className="lbl">CMV involved</span><select value={f.cmv} onChange={(e)=>set('cmv',e.target.value)} className="inp"><option>Unknown</option><option>Yes</option><option>No</option></select></div>
+            <div><span className="lbl">CDL related</span><select value={f.cdl} onChange={(e)=>set('cdl',e.target.value)} className="inp"><option>Unknown</option><option>Yes</option><option>No</option></select></div>
+            <div><span className="lbl">Fine ($)</span><input type="number" step="0.01" value={f.fine} onChange={(e)=>set('fine',e.target.value)} className="inp" /></div>
+            <div className="sm:col-span-3"><span className="lbl">Customer fee ($) — what you charge</span><input type="number" step="0.01" value={f.fee} onChange={(e)=>set('fee',e.target.value)} className="inp" placeholder="e.g. 500" /></div>
+          </div>
+        </div>
+        <div className="card p-5">
+          <p className="mb-3 text-[11px] font-bold uppercase tracking-wider text-brand-600">Workflow</p>
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+            <div><span className="lbl">Assigned agent</span><select value={f.agentId} onChange={(e)=>set('agentId',e.target.value)} className="inp"><option value="">— unassigned —</option>{agents.map((a)=><option key={a.id} value={a.id}>{a.name}</option>)}</select></div>
+            <div><span className="lbl">Priority</span><select value={f.priority} onChange={(e)=>set('priority',e.target.value)} className="inp"><option>Low</option><option>Normal</option><option>High</option></select></div>
+            <div><span className="lbl">Status</span><select value={f.status} onChange={(e)=>set('status',e.target.value)} className="inp"><option>New</option><option>Action Required</option><option>Hearing Scheduled</option><option>Waiting for Court</option><option>Resolved</option><option>Dismissed</option></select></div>
+          </div>
+        </div>
+        <div className="flex justify-end gap-2">
+          <button type="button" onClick={()=>router.push('/cases')} className="btn btn-ghost">Cancel</button>
+          <button className="btn btn-red">Create case</button>
         </div>
       </form>
     </div>
