@@ -49,6 +49,7 @@ create table if not exists login_attempts (
 create table if not exists settings (
   key text primary key, value text, updated_at timestamptz not null default now()
 );
+alter table customers add column if not exists dob date;
 create table if not exists documents (
   id text primary key default gen_random_uuid(),
   customer_id text, case_id text, category text not null, file_name text not null, url text not null,

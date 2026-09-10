@@ -6,36 +6,35 @@
 body { font-family: Inter, system-ui, sans-serif; }
 
 @layer components {
-  /* Sidebar nav */
   .nav { display:flex; align-items:center; gap:.6rem; border-radius:.55rem; padding:.5rem .75rem; font-size:.87rem; font-weight:500; color:#c9c9cf; cursor:pointer; transition:.15s; }
   .nav:hover { background:rgba(255,255,255,.07); color:#fff; }
   .nav.active { background:linear-gradient(90deg,rgba(198,34,34,.30),rgba(255,255,255,.03)); color:#fff; box-shadow:inset 3px 0 0 #dc3b3b; }
+  .nav-ico { width:1.1rem; text-align:center; font-size:.95rem; opacity:.9; }
 
   .card { background:#fff; border-radius:.9rem; box-shadow:0 1px 2px rgba(10,10,11,.06),0 4px 16px rgba(10,10,11,.05); border:1px solid #eef0f2; }
   .badge { display:inline-flex; align-items:center; gap:.3rem; border-radius:999px; padding:.1rem .55rem; font-size:.71rem; font-weight:600; }
   .dot { height:.4rem; width:.4rem; border-radius:999px; background:currentColor; }
-
   .chip { padding:.3rem .7rem; border-radius:.55rem; font-size:.78rem; font-weight:600; cursor:pointer; border:1px solid #e5e7eb; color:#475569; background:#fff; }
   .chip.active { background:#0a0a0b; color:#fff; border-color:#0a0a0b; }
-
   .btn { display:inline-flex; align-items:center; gap:.4rem; border-radius:.5rem; padding:.5rem .9rem; font-size:.85rem; font-weight:600; cursor:pointer; }
   .btn-red { background:#c62222; color:#fff; } .btn-red:hover { background:#a51b1b; }
   .btn-ghost { background:#fff; color:#334155; border:1px solid #d7dbe2; } .btn-ghost:hover { background:#f8fafc; }
-
   .lbl { font-size:.72rem; font-weight:600; color:#64748b; margin-bottom:.15rem; display:block; }
-  .inp { width:100%; border:1px solid #d7dbe2; border-radius:.5rem; padding:.5rem .6rem; font-size:.85rem; background:#fff; }
-  .inp:focus { outline:none; border-color:#dc3b3b; box-shadow:0 0 0 3px rgba(220,59,59,.15); }
 }
 
-/* Professional table styling to match mockup */
+/* Table styling */
 table th { font-size:.7rem; text-transform:uppercase; letter-spacing:.03em; color:#64748b; font-weight:600; text-align:left; padding:.7rem 1rem; background:#f8fafc; }
 table td { padding:.7rem 1rem; font-size:.86rem; border-top:1px solid #f1f5f9; }
 tr.rowlink { cursor:pointer; } tr.rowlink:hover { background:#fafbfc; }
 
-/* Make every form field look consistent & aligned (no forms plugin needed) */
-input[type=text], input[type=email], input[type=password], input[type=number], input[type=date], input[type=datetime-local], select, textarea {
+/* Universal, aligned form fields (catches inputs WITHOUT an explicit type too) */
+.inp,
+input:not([type='checkbox']):not([type='radio']):not([type='file']):not([type='submit']):not([type='button']):not([type='range']),
+select, textarea {
   width:100%; border:1px solid #d7dbe2; border-radius:.5rem; padding:.5rem .6rem; font-size:.85rem; background:#fff; color:#0f172a;
 }
-input:focus, select:focus, textarea:focus { outline:none; border-color:#dc3b3b; box-shadow:0 0 0 3px rgba(220,59,59,.15); }
+.inp:focus,
+input:not([type='checkbox']):not([type='radio']):not([type='file']):focus,
+select:focus, textarea:focus { outline:none; border-color:#dc3b3b; box-shadow:0 0 0 3px rgba(220,59,59,.15); }
 
 ::-webkit-scrollbar { height:8px; width:8px; } ::-webkit-scrollbar-thumb { background:#cbd5e1; border-radius:8px; }
