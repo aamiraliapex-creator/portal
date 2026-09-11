@@ -73,6 +73,10 @@ alter table cases add column if not exists fee_since timestamptz;
 alter table cases add column if not exists next_action text;
 alter table cases add column if not exists next_action_at timestamptz;
 alter table cases add column if not exists agent_id text;
+alter table cases add column if not exists hearing_at timestamptz;
+alter table cases add column if not exists hearing_tz text;
+alter table cases add column if not exists hearing_type text default 'In person';
+alter table cases add column if not exists prep_status text default 'Not started';
 
 alter table payments add column if not exists case_id text;
 alter table payments add column if not exists kind text default 'Membership';

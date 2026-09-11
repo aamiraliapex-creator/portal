@@ -1,16 +1,18 @@
 'use client'
 import { useRouter } from 'next/navigation'
 import { useState } from 'react'
+import { stateToTz, localInputToUtcIso } from '@/lib/timezones'
 type Customer = { id: string; first_name: string; last_name: string; legacy_member_id?: string | null }
 export default function CaseForm({ customers, agents }: { customers: Customer[]; agents: { id: string; name: string }[] }) {
   const router = useRouter()
-  const [f, setF] = useState({ customerId: customers[0]?.id || '', citation: '', officialNo: '', ticket: '', state: '', court: '', violationDate: '', cmv: 'Unknown', cdl: 'Unknown', fine: '', fee: '', agentId: '', priority: 'Normal', status: 'New' })
+  const [f, setF] = useState({ customerId: customers[0]?.id || '', citation: '', officialNo: '', ticket: '', state: '', court: '', violationDate: '', cmv: 'Unknown', cdl: 'Unknown', fine: '', fee: '', agentId: '', priority: 'Normal', status: 'New', hearingAt: '', hearingType: 'In person', prepStatus: 'Not started' })
   const [error, setError] = useState('')
   const set = (k: string, v: string) => setF((s) => ({ ...s, [k]: v }))
   async function submit(e: React.FormEvent) {
     e.preventDefault(); setError('')
     if (!f.customerId) { setError('Select a customer.'); return }
-    const res = await fetch('/api/cases', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(f) })
+    const hearingAt = f.hearingAt ? localInputToUtcIso(f.hearingAt, stateToTz(f.state)) : ''
+    const res = await fetch('/api/cases', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...f, hearingAt }) })
     if (res.ok) { router.push('/cases'); router.refresh() } else { const d = await res.json().catch(()=>({})); setError(d.error || 'Could not save.') }
   }
   const custName = customers.find((c) => c.id === f.customerId)
@@ -49,6 +51,15 @@ export default function CaseForm({ customers, agents }: { customers: Customer[];
             <div><span className="lbl">Priority</span><select value={f.priority} onChange={(e)=>set('priority',e.target.value)} className="inp"><option>Low</option><option>Normal</option><option>High</option></select></div>
             <div><span className="lbl">Status</span><select value={f.status} onChange={(e)=>set('status',e.target.value)} className="inp"><option>New</option><option>Action Required</option><option>Hearing Scheduled</option><option>Waiting for Court</option><option>Resolved</option><option>Dismissed</option></select></div>
           </div>
+        </div>
+        <div className="card p-5">
+          <p className="mb-3 text-[11px] font-bold uppercase tracking-wider text-brand-600">Hearing (optional)</p>
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+            <div><span className="lbl">Date &amp; time (court-local)</span><input type="datetime-local" value={f.hearingAt} onChange={(e)=>set('hearingAt',e.target.value)} className="inp" /></div>
+            <div><span className="lbl">Type</span><select value={f.hearingType} onChange={(e)=>set('hearingType',e.target.value)} className="inp"><option>In person</option><option>Zoom</option><option>Phone</option></select></div>
+            <div><span className="lbl">Prep status</span><select value={f.prepStatus} onChange={(e)=>set('prepStatus',e.target.value)} className="inp"><option>Not started</option><option>In progress</option><option>Ready</option></select></div>
+          </div>
+          <p className="mt-2 text-xs text-slate-400">Time zone is inferred from the state entered above. You can adjust this later from the Hearings page.</p>
         </div>
         <div className="flex justify-end gap-2">
           <button type="button" onClick={()=>router.push('/cases')} className="btn btn-ghost">Cancel</button>
