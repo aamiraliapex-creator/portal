@@ -1,5 +1,6 @@
 import Link from 'next/link'
 import { getSql } from '@/lib/db'
+import { ensureSchemaOnce } from '@/lib/schema'
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
@@ -10,6 +11,7 @@ type Row = {
 }
 
 export default async function Cases() {
+  await ensureSchemaOnce()
   const sql = getSql()
   const rows = await sql<Row[]>`
     select k.id, k.citation, k.official_no, k.court, k.status, k.fee, k.customer_id,

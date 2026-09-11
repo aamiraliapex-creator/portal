@@ -1,5 +1,6 @@
 import Link from 'next/link'
 import { getSql } from '@/lib/db'
+import { ensureSchemaOnce } from '@/lib/schema'
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
@@ -10,6 +11,7 @@ type Customer = {
 type CaseRow = { id: string; citation: string | null; official_no: string | null; status: string; fee: string | null; paid: string | null }
 
 export default async function CustomerProfile({ params }: { params: { id: string } }) {
+  await ensureSchemaOnce()
   const sql = getSql()
   const [c] = await sql<Customer[]>`select * from customers where id = ${params.id} limit 1`
   if (!c) return <div><h1 className="text-xl font-semibold">Customer not found</h1><Link className="text-brand-600" href="/customers">Back to customers</Link></div>
