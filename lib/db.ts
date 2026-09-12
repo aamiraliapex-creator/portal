@@ -24,7 +24,7 @@ export function getSql() {
   const url = pickUrl()
   if (!url) throw new Error('No database URL found. Set DATABASE_URL in Vercel → Settings → Environment Variables, then Redeploy.')
   if (!global._sql) {
-    global._sql = postgres(url, { ssl: 'require', prepare: false, max: 1 })
+    global._sql = postgres(url, { ssl: 'require', prepare: false, max: 10, idle_timeout: 20, connect_timeout: 10 })
   }
   return global._sql
 }
