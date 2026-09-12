@@ -96,10 +96,29 @@ alter table documents add column if not exists customer_id text;
 alter table documents add column if not exists case_id text;
 `
 
+// Speeds up every list/dashboard/report page, which all filter or sort by these columns.
+const INDEXES = `
+create index if not exists idx_cases_customer_id on cases(customer_id);
+create index if not exists idx_cases_status on cases(status);
+create index if not exists idx_cases_hearing_at on cases(hearing_at);
+create index if not exists idx_cases_next_action_at on cases(next_action_at);
+create index if not exists idx_cases_created_at on cases(created_at);
+create index if not exists idx_payments_customer_id on payments(customer_id);
+create index if not exists idx_payments_paid_at on payments(paid_at);
+create index if not exists idx_tasks_customer_id on tasks(customer_id);
+create index if not exists idx_tasks_due_at on tasks(due_at);
+create index if not exists idx_tasks_status on tasks(status);
+create index if not exists idx_documents_customer_id on documents(customer_id);
+create index if not exists idx_documents_case_id on documents(case_id);
+create index if not exists idx_customers_created_at on customers(created_at);
+create index if not exists idx_customers_agent_id on customers(agent_id);
+`
+
 export async function ensureSchema(): Promise<void> {
   const sql = getSql()
   await sql.unsafe(CREATE)
   await sql.unsafe(ALTER)
+  await sql.unsafe(INDEXES)
   const email = (process.env.SUPERADMIN_EMAIL || 'owner@clprotectionusa.com').toLowerCase()
   const existing = await sql`select id from users where email = ${email} limit 1`
   if (existing.length === 0) {
@@ -112,7 +131,25 @@ export async function ensureSchema(): Promise<void> {
   ensured = true
 }
 
+// Bump this whenever CREATE/ALTER/INDEXES change. Lets a warm-but-reset or cold
+// serverless instance skip the (expensive, lock-taking) migration with a single
+// cheap primary-key lookup instead of re-running ~40 DDL statements on every request.
+const SCHEMA_VERSION = 'v3-hearings-indexes'
+
 export async function ensureSchemaOnce(): Promise<void> {
   if (ensured) return
-  try { await ensureSchema() } catch (e) { console.error('ensureSchema failed:', e) }
+  const sql = getSql()
+  try {
+    const [row] = await sql<{ value: string }[]>`select value from settings where key = 'schema_version' limit 1`
+    if (row?.value === SCHEMA_VERSION) { ensured = true; return }
+  } catch {
+    // settings table may not exist yet (first-ever run) — fall through to full migration below.
+  }
+  try {
+    await ensureSchema()
+    await sql`insert into settings (key, value) values ('schema_version', ${SCHEMA_VERSION})
+      on conflict (key) do update set value = excluded.value, updated_at = now()`
+  } catch (e) {
+    console.error('ensureSchema failed:', e)
+  }
 }
