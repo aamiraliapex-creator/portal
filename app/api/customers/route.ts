@@ -1,12 +1,12 @@
 import { NextResponse } from 'next/server'
 import { getSql } from '@/lib/db'
 import { ensureSchemaOnce } from '@/lib/schema'
-import { getSession } from '@/lib/session'
+import { getCurrentUser, canWriteBusinessData } from '@/lib/authz'
 export const runtime = 'nodejs'
 
 export async function POST(req: Request) {
-  const session = await getSession()
-  if (!session) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  const actor = await getCurrentUser()
+  if (!canWriteBusinessData(actor)) return NextResponse.json({ error: 'You do not have permission to create customers.' }, { status: 403 })
   await ensureSchemaOnce()
   const b = await req.json().catch(() => ({}))
   if (!b.firstName || !b.lastName) return NextResponse.json({ error: 'First and last name are required.' }, { status: 400 })

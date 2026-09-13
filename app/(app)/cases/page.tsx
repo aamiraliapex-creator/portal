@@ -15,10 +15,10 @@ const badge = (s: string) => {
 }
 const dotColor = (s: string) => (s.includes('Hearing') ? 'text-sky-600' : s.includes('Resolved') || s.includes('Dismissed') ? 'text-emerald-600' : 'text-amber-600')
 
-export default async function Cases({ searchParams }: { searchParams: { q?: string } }) {
+export default async function Cases({ searchParams }: { searchParams: Promise<{ q?: string }> }) {
   await ensureSchemaOnce()
   const sql = getSql()
-  const q = (searchParams.q || '').trim()
+  const q = ((await searchParams).q || '').trim()
   const rows = await sql<Row[]>`
     select k.id, k.citation, k.official_no, k.court, k.state, k.status, k.cdl, k.cmv, k.next_action, k.next_action_at,
            c.first_name, c.last_name, k.customer_id, u.name as agent_name

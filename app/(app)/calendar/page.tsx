@@ -15,12 +15,13 @@ const KIND_STYLE: Record<Ev['kind'], { dot: string; pill: string; icon: string; 
   holiday: { dot: 'bg-violet-500', pill: 'bg-violet-50 text-violet-700 ring-1 ring-inset ring-violet-200', icon: '🎉', label: 'Holiday' },
 }
 
-export default async function Calendar({ searchParams }: { searchParams: { y?: string; m?: string } }) {
+export default async function Calendar({ searchParams }: { searchParams: Promise<{ y?: string; m?: string }> }) {
   await ensureSchemaOnce()
   const sql = getSql()
   const now = new Date()
-  const y = parseInt(searchParams.y || String(now.getFullYear()))
-  const m = parseInt(searchParams.m ?? String(now.getMonth())) // 0-11
+  const sp = await searchParams
+  const y = parseInt(sp.y || String(now.getFullYear()))
+  const m = parseInt(sp.m ?? String(now.getMonth())) // 0-11
   const monthStart = new Date(y, m, 1)
   const monthEnd = new Date(y, m + 1, 1)
   const iso = (d: Date) => d.toISOString().slice(0, 10)

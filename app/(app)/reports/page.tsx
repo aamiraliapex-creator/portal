@@ -16,10 +16,11 @@ function Bars({ pairs }: { pairs: [string, number][] }) {
     <div key={l} className="flex items-center gap-4 text-sm"><span className="w-48 truncate text-slate-700">{l}</span><div className="h-3 flex-1 rounded bg-slate-100"><div className="h-3 rounded bg-brand-600" style={{ width: Math.round((n / max) * 100) + '%' }} /></div><span className="w-10 text-right font-medium">{n}</span></div>))}</div>)
 }
 
-export default async function Reports({ searchParams }: { searchParams: { r?: string } }) {
+export default async function Reports({ searchParams }: { searchParams: Promise<{ r?: string }> }) {
   await ensureSchemaOnce()
   const sql = getSql()
-  const r = REPORTS.find(([k]) => k === searchParams.r)?.[0] || 'status'
+  const sp = await searchParams
+  const r = REPORTS.find(([k]) => k === sp.r)?.[0] || 'status'
   const title = REPORTS.find(([k]) => k === r)![1]
 
   let content: React.ReactNode = null

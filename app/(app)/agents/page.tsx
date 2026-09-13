@@ -8,11 +8,12 @@ const money = (n: number) => '$' + Number(n || 0).toLocaleString()
 
 type Row = { id: string; name: string; customers: number; active: number; cancelled: number; cases: number; collected: string }
 
-export default async function Agents({ searchParams }: { searchParams: { from?: string; to?: string; agent?: string } }) {
+export default async function Agents({ searchParams }: { searchParams: Promise<{ from?: string; to?: string; agent?: string }> }) {
   await ensureSchemaOnce()
+  const sp = await searchParams
   const sql = getSql()
-  const from = searchParams.from || null
-  const to = searchParams.to || null
+  const from = sp.from || null
+  const to = sp.to || null
   const range = sql`(${from}::date is null or coalesce(cu.joined_at,cu.created_at) >= ${from}::date) and (${to}::date is null or coalesce(cu.joined_at,cu.created_at) < (${to}::date + 1))`
 
   const rows = await sql<Row[]>`
@@ -30,8 +31,8 @@ export default async function Agents({ searchParams }: { searchParams: { from?: 
 
   // drill-down
   let drill: React.ReactNode = null
-  if (searchParams.agent) {
-    const aId = searchParams.agent
+  if (sp.agent) {
+    const aId = sp.agent
     const a = rows.find((r) => r.id === aId)
     const custs = await sql<{ id: string; first_name: string; last_name: string; legacy_member_id: string | null; plan: string | null; sub_status: string; joined: string }[]>`
       select id, first_name, last_name, legacy_member_id, plan, sub_status, coalesce(joined_at,created_at) joined from customers where agent_id=${aId} order by coalesce(joined_at,created_at) desc`

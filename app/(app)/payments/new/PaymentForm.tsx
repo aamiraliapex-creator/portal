@@ -9,7 +9,14 @@ export default function PaymentForm({ customers, cases }: { customers: Customer[
   const router = useRouter()
   const [form, setForm] = useState({ customerId: customers[0]?.id || '', kind: 'Membership', caseId: '', method: 'Card', amount: '', status: 'Paid' })
   const [error, setError] = useState('')
-  const set = (k: string, v: string) => setForm((f) => ({ ...f, [k]: v }))
+  const set = (k: string, v: string) => setForm((f) => {
+    // Changing the customer invalidates any previously-selected case (it belongs to the old
+    // customer), and switching away from "Case" no longer needs a case at all. Leaving the
+    // stale caseId in place let a mismatched or hidden selection get submitted silently.
+    if (k === 'customerId') return { ...f, customerId: v, caseId: '' }
+    if (k === 'kind' && v !== 'Case') return { ...f, kind: v, caseId: '' }
+    return { ...f, [k]: v }
+  })
   const custCases = cases.filter((c) => c.customer_id === form.customerId)
 
   async function submit(e: React.FormEvent) {

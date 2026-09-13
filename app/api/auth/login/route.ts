@@ -5,7 +5,7 @@ import { verifyPassword } from '@/lib/password'
 import { createSession } from '@/lib/session'
 export const runtime = 'nodejs'
 
-type U = { id: string; name: string; email: string; password_hash: string; role: string; status: string }
+type U = { id: string; name: string; email: string; password_hash: string; role: string; status: string; token_version: number }
 const MAX_ATTEMPTS = 5
 const LOCK_MINUTES = 15
 
@@ -27,7 +27,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: 'Too many attempts. Please try again in a few minutes.' }, { status: 429 })
     }
 
-    const rows = await sql<U[]>`select id, name, email, password_hash, role, status from users where email = ${emailLc} limit 1`
+    const rows = await sql<U[]>`select id, name, email, password_hash, role, status, coalesce(token_version,0) as token_version from users where email = ${emailLc} limit 1`
     const user = rows[0]
     const good = !!user && user.status === 'ACTIVE' && (await verifyPassword(password, user.password_hash))
 
@@ -44,7 +44,7 @@ export async function POST(req: Request) {
 
     try { await sql`delete from login_attempts where email = ${emailLc}` } catch {}
     try { await sql`update users set last_login_at = now() where id = ${user!.id}` } catch {}
-    await createSession({ id: user!.id, name: user!.name, email: user!.email, role: user!.role })
+    await createSession({ id: user!.id, name: user!.name, email: user!.email, role: user!.role, tokenVersion: user!.token_version })
     return NextResponse.json({ ok: true })
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : 'Server error'

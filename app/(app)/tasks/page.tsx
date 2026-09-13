@@ -7,10 +7,10 @@ export const dynamic = 'force-dynamic'
 
 type T = { id: string; title: string; case_ref: string | null; assignee: string | null; due_at: string | null; priority: string; status: string }
 
-export default async function Tasks({ searchParams }: { searchParams: { filter?: string } }) {
+export default async function Tasks({ searchParams }: { searchParams: Promise<{ filter?: string }> }) {
   await ensureSchemaOnce()
   const sql = getSql()
-  const filter = searchParams.filter || 'all'
+  const filter = (await searchParams).filter || 'all'
   const rows = await sql<T[]>`select id, title, case_ref, assignee, due_at, priority, status from tasks order by created_at desc limit 200`
   const now = Date.now()
   const isOverdue = (t: T) => (t.status === 'Open' || t.status === 'In Progress') && t.due_at != null && new Date(t.due_at).getTime() < now
