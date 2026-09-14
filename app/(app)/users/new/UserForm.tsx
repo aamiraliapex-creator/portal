@@ -1,9 +1,9 @@
 'use client'
 import { useRouter } from 'next/navigation'
 import { useState } from 'react'
-export default function UserForm() {
+export default function UserForm({ allowedRoles }: { allowedRoles: readonly string[] }) {
   const router = useRouter()
-  const [form, setForm] = useState({ name: '', email: '', role: 'CASE_AGENT', status: 'ACTIVE', password: '' })
+  const [form, setForm] = useState({ name: '', email: '', role: allowedRoles[allowedRoles.length - 1] || 'CASE_AGENT', status: 'ACTIVE', password: '' })
   const [error, setError] = useState('')
   const set = (k: string, v: string) => setForm((f) => ({ ...f, [k]: v }))
   async function submit(e: React.FormEvent) {
@@ -11,7 +11,7 @@ export default function UserForm() {
     const res = await fetch('/api/users', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(form) })
     if (res.ok) { router.push('/users'); router.refresh() } else { const d = await res.json().catch(()=>({})); setError(d.error || 'Could not save.') }
   }
-  const roles = ['SUPER_ADMIN','ADMIN','MANAGER','CASE_AGENT','SALES_AGENT','BILLING','DOCUMENT_STAFF','READ_ONLY']
+  const roles = allowedRoles
   return (
     <div className="max-w-2xl">
       <h1 className="text-xl font-semibold text-slate-900">Add user</h1>

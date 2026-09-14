@@ -17,14 +17,15 @@ type Row = {
 
 const subBadge = (s: string) => s === 'Active' ? 'bg-emerald-50 text-emerald-700' : s === 'Cancelled' ? 'bg-rose-50 text-rose-700' : s === 'Past due' ? 'bg-amber-50 text-amber-700' : 'bg-slate-100 text-slate-500'
 
-export default async function Customers({ searchParams }: { searchParams: { q?: string; from?: string; to?: string; status?: string; page?: string } }) {
+export default async function Customers({ searchParams }: { searchParams: Promise<{ q?: string; from?: string; to?: string; status?: string; page?: string }> }) {
   await ensureSchemaOnce()
   const sql = getSql()
-  const q = (searchParams.q || '').trim()
-  const from = searchParams.from || null
-  const to = searchParams.to || null
-  const status = searchParams.status || 'all'
-  const page = Math.max(1, parseInt(searchParams.page || '1') || 1)
+  const sp = await searchParams
+  const q = (sp.q || '').trim()
+  const from = sp.from || null
+  const to = sp.to || null
+  const status = sp.status || 'all'
+  const page = Math.max(1, parseInt(sp.page || '1') || 1)
 
   // KPIs over the date-filtered set
   const [k] = await sql<{ total: number; active: number; cancelled: number; pastdue: number; cdl: number; overdue: number }[]>`

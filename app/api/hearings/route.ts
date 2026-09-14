@@ -1,12 +1,12 @@
 import { NextResponse } from 'next/server'
 import { getSql } from '@/lib/db'
-import { getSession } from '@/lib/session'
+import { getCurrentUser, canWriteBusinessData } from '@/lib/authz'
 import { stateToTz } from '@/lib/timezones'
 export const runtime = 'nodejs'
 
 export async function POST(req: Request) {
-  const session = await getSession()
-  if (!session) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  const actor = await getCurrentUser()
+  if (!canWriteBusinessData(actor)) return NextResponse.json({ error: 'You do not have permission to schedule hearings.' }, { status: 403 })
   const b = await req.json().catch(() => ({}))
   if (!b.caseId) return NextResponse.json({ error: 'Case is required.' }, { status: 400 })
   const sql = getSql()

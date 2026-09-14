@@ -2,7 +2,7 @@ import Link from 'next/link'
 import { redirect } from 'next/navigation'
 import { getSql } from '@/lib/db'
 import { ensureSchemaOnce } from '@/lib/schema'
-import { getSession } from '@/lib/session'
+import { getCurrentUser } from '@/lib/authz'
 import LogoutButton from './LogoutButton'
 import DualClock from './DualClock'
 import NavLink from './NavLink'
@@ -17,7 +17,12 @@ const NAV: [string, string, string][] = [
 const ADMIN: [string, string, string][] = [['◐', 'Team & Users', '/users'], ['▣', 'Audit Log', '/audit'], ['⚙', 'Settings', '/settings']]
 
 export default async function AppLayout({ children }: { children: React.ReactNode }) {
-  const session = await getSession()
+  // getCurrentUser() (not the raw session cookie) is what makes disabling a user, deleting
+  // a user, or changing a password take effect immediately: it re-checks status and
+  // token_version against the database on every request, on every page under this layout —
+  // not just on the write-side API routes. A merely-well-signed but since-revoked JWT is
+  // rejected here before any page content renders.
+  const session = await getCurrentUser()
   if (!session) redirect('/login')
   const initials = session.name.split(' ').map((s) => s[0]).slice(0, 2).join('')
   return (

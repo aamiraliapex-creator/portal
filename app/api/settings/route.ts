@@ -1,10 +1,11 @@
 import { NextResponse } from 'next/server'
 import { getSql } from '@/lib/db'
 import { ensureSchemaOnce } from '@/lib/schema'
-import { getSession } from '@/lib/session'
+import { getCurrentUser, canManageSettings } from '@/lib/authz'
 export const runtime = 'nodejs'
 export async function POST(req: Request) {
-  const s = await getSession(); if (!s || !['SUPER_ADMIN','ADMIN','MANAGER'].includes(s.role)) return NextResponse.json({ error: 'Not allowed.' }, { status: 403 })
+  const actor = await getCurrentUser()
+  if (!canManageSettings(actor)) return NextResponse.json({ error: 'Not allowed.' }, { status: 403 })
   await ensureSchemaOnce()
   const b = await req.json().catch(() => ({}))
   const sql = getSql()
