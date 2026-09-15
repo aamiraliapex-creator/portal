@@ -1,34 +1,70 @@
-import { cache } from 'react'
-import { getSql } from './db'
-import { getSession } from './session'
-import { isRole } from './permissions'
+/**
+ * Central role + permission definitions.
+ * Every server-side write must go through hasPermission()/requirePermission().
+ */
+export const ROLES = [
+  'SUPER_ADMIN', 'ADMIN', 'MANAGER', 'CASE_AGENT', 'SALES_AGENT', 'BILLING', 'DOCUMENT_STAFF', 'READ_ONLY',
+] as const
+export type Role = (typeof ROLES)[number]
 
-// Re-export the pure permission matrix so existing `from '@/lib/authz'` imports keep working.
-export * from './permissions'
-import type { CurrentUser } from './permissions'
+export const USER_STATUSES = ['ACTIVE', 'DISABLED'] as const
+export type UserStatus = (typeof USER_STATUSES)[number]
+
+export function isRole(v: unknown): v is Role { return typeof v === 'string' && (ROLES as readonly string[]).includes(v) }
+export function isUserStatus(v: unknown): v is UserStatus { return typeof v === 'string' && (USER_STATUSES as readonly string[]).includes(v) }
+
+/** Lower number = more privileged. Used to stop lateral/upward management. */
+export const ROLE_RANK: Record<Role, number> = {
+  SUPER_ADMIN: 0, ADMIN: 1, MANAGER: 2,
+  CASE_AGENT: 3, SALES_AGENT: 3, BILLING: 3, DOCUMENT_STAFF: 3, READ_ONLY: 4,
+}
+
+export const PERMISSIONS = [
+  'customer.create', 'customer.update',
+  'case.create', 'case.update',
+  'payment.create',
+  'task.create', 'task.update',
+  'assignment.update',
+  'settings.update',
+  'user.manage',   // create / enable / disable
+  'user.delete',   // hard delete
+  'report.export',
+  'schema.migrate',
+] as const
+export type Permission = (typeof PERMISSIONS)[number]
 
 /**
- * The authoritative "who is making this request" check. Unlike the raw session cookie,
- * this re-reads status/role/token_version from the database on every call, so:
- *  - a disabled or deleted account stops working immediately, not just after the JWT expires
- *  - a role change (e.g. demotion) takes effect on the very next request
- *  - a password change invalidates every session issued before it (token_version mismatch)
- * Wrapped in React's `cache()` so multiple calls within one request/render only hit the DB once.
+ * Permission matrix. READ_ONLY intentionally holds no write permission.
+ * Assumption (documented): BILLING handles money, DOCUMENT_STAFF handles files,
+ * SALES_AGENT owns customer intake, CASE_AGENT owns case work.
  */
-export const getCurrentUser = cache(async (): Promise<CurrentUser | null> => {
-  const session = await getSession()
-  if (!session) return null
-  const sql = getSql()
-  let rows: { id: string; name: string; email: string; role: string; status: string; token_version: number }[]
-  try {
-    rows = await sql`select id, name, email, role, status, coalesce(token_version, 0) as token_version from users where id = ${session.id} limit 1`
-  } catch {
-    return null
-  }
-  const u = rows[0]
-  if (!u) return null
-  if (u.status !== 'ACTIVE') return null
-  if (session.tokenVersion !== u.token_version) return null
-  if (!isRole(u.role)) return null
-  return { id: u.id, name: u.name, email: u.email, role: u.role, tokenVersion: u.token_version }
-})
+const MATRIX: Record<Permission, Role[]> = {
+  'customer.create':    ['SUPER_ADMIN', 'ADMIN', 'MANAGER', 'SALES_AGENT', 'CASE_AGENT'],
+  'customer.update':    ['SUPER_ADMIN', 'ADMIN', 'MANAGER', 'SALES_AGENT', 'CASE_AGENT'],
+  'case.create':        ['SUPER_ADMIN', 'ADMIN', 'MANAGER', 'CASE_AGENT'],
+  'case.update':        ['SUPER_ADMIN', 'ADMIN', 'MANAGER', 'CASE_AGENT'],
+  'payment.create':     ['SUPER_ADMIN', 'ADMIN', 'MANAGER', 'BILLING'],
+  'task.create':        ['SUPER_ADMIN', 'ADMIN', 'MANAGER', 'CASE_AGENT', 'SALES_AGENT', 'BILLING', 'DOCUMENT_STAFF'],
+  'task.update':        ['SUPER_ADMIN', 'ADMIN', 'MANAGER', 'CASE_AGENT', 'SALES_AGENT', 'BILLING', 'DOCUMENT_STAFF'],
+  'assignment.update':  ['SUPER_ADMIN', 'ADMIN', 'MANAGER'],
+  'settings.update':    ['SUPER_ADMIN', 'ADMIN', 'MANAGER'],
+  'user.manage':        ['SUPER_ADMIN', 'ADMIN'],
+  'user.delete':        ['SUPER_ADMIN'],
+  'report.export':      ['SUPER_ADMIN', 'ADMIN', 'MANAGER', 'BILLING', 'CASE_AGENT', 'SALES_AGENT', 'DOCUMENT_STAFF', 'READ_ONLY'],
+  'schema.migrate':     ['SUPER_ADMIN'],
+}
+
+export function hasPermission(role: string | null | undefined, perm: Permission): boolean {
+  if (!isRole(role)) return false
+  return MATRIX[perm].includes(role)
+}
+
+/** Can `actor` create or modify an account whose role is `targetRole`? */
+export function canManageRole(actorRole: string, targetRole: string): boolean {
+  if (!isRole(actorRole) || !isRole(targetRole)) return false
+  if (!hasPermission(actorRole, 'user.manage')) return false
+  // Only a SUPER_ADMIN may create or touch another SUPER_ADMIN.
+  if (targetRole === 'SUPER_ADMIN') return actorRole === 'SUPER_ADMIN'
+  // Otherwise the actor must be strictly more privileged than the target.
+  return ROLE_RANK[actorRole] < ROLE_RANK[targetRole]
+}

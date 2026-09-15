@@ -1,9 +1,7 @@
 import { getSql } from '@/lib/db'
-import { ensureSchemaOnce } from '@/lib/schema'
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 export default async function Documents() {
-  await ensureSchemaOnce()
   const sql = getSql()
   const rows = await sql<{ id: string; category: string; file_name: string; created_at: string }[]>`select id, category, file_name, created_at from documents order by created_at desc limit 100`
   return (

@@ -7,7 +7,9 @@
     "build": "next build",
     "start": "next start",
     "db:setup": "node scripts/setup.mjs",
-    "test": "tsx --test tests/authz.test.ts tests/csv.test.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test tests/unit.test.mjs tests/validation.test.ts",
+    "test:unit": "node --test tests/unit.test.mjs",
     "test:integration": "bash scripts/run-integration-tests.sh"
   },
   "dependencies": {
@@ -15,18 +17,21 @@
     "jose": "^5.9.6",
     "next": "16.3.5",
     "postgres": "^3.4.5",
-    "react": "18.3.1",
-    "react-dom": "18.3.1"
+    "react": "19.2.0",
+    "react-dom": "19.2.0"
   },
   "devDependencies": {
     "@types/bcryptjs": "^2.4.6",
     "@types/node": "^20.16.11",
-    "@types/react": "18.3.11",
-    "@types/react-dom": "18.3.0",
+    "@types/react": "19.2.2",
+    "@types/react-dom": "19.2.1",
     "autoprefixer": "^10.4.20",
     "postcss": "^8.4.47",
     "tailwindcss": "^3.4.13",
-    "tsx": "^4.19.0",
-    "typescript": "^5.6.3"
+    "typescript": "^5.6.3",
+    "tsx": "^4.19.0"
+  },
+  "engines": {
+    "node": ">=20.9.0"
   }
 }

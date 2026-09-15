@@ -1,6 +1,5 @@
 import Link from 'next/link'
 import { getSql } from '@/lib/db'
-import { ensureSchemaOnce } from '@/lib/schema'
 import { stateToTz, formatInTz, formatTimeInTz, OFFICE_TZ } from '@/lib/timezones'
 import SchedulePicker from './SchedulePicker'
 export const runtime = 'nodejs'
@@ -28,7 +27,6 @@ const prepBadge = (p: string) => {
 }
 
 export default async function Hearings() {
-  await ensureSchemaOnce()
   const sql = getSql()
   const rows = await sql<Row[]>`
     select k.id, k.citation, k.official_no, k.court, k.state, k.status, k.hearing_at, k.hearing_tz, k.hearing_type, k.prep_status,

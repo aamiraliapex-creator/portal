@@ -1,19 +1,17 @@
 import Link from 'next/link'
 import { getSql } from '@/lib/db'
-import { ensureSchemaOnce } from '@/lib/schema'
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 const money = (n: number) => '$' + Number(n || 0).toLocaleString()
 const d = (s: string | null) => (s ? new Date(s).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : '—')
 
-export default async function Payments({ searchParams }: { searchParams: Promise<{ tab?: string; from?: string; to?: string; status?: string }> }) {
-  await ensureSchemaOnce()
+export default async function Payments({ searchParams: searchParamsInput }: { searchParams: Promise<{ tab?: string; from?: string; to?: string; status?: string }> }) {
+  const searchParams = await searchParamsInput
   const sql = getSql()
-  const sp = await searchParams
-  const tab = ['payments', 'invoices', 'subscriptions'].includes(sp.tab || '') ? sp.tab! : 'bycustomer'
-  const from = sp.from || null
-  const to = sp.to || null
-  const status = sp.status || 'all'
+  const tab = ['payments', 'invoices', 'subscriptions'].includes(searchParams.tab || '') ? searchParams.tab! : 'bycustomer'
+  const from = searchParams.from || null
+  const to = searchParams.to || null
+  const status = searchParams.status || 'all'
   const inRange = sql`(${from}::date is null or p.paid_at >= ${from}::date) and (${to}::date is null or p.paid_at < (${to}::date + 1))`
 
   const [tot] = await sql<{ paid: string; unpaid: string; cpaid: number; cunpaid: number }[]>`

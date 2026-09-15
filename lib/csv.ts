@@ -1,15 +1,20 @@
-// Neutralizes CSV/spreadsheet formula injection. If a text cell starts with a character
-// that Excel/Sheets/LibreOffice would interpret as the start of a formula (=, +, -, @, or
-// a leading tab/CR), prefix it with a single quote so it's forced to render as plain text
-// instead of being evaluated — this is the standard mitigation for CSV injection. Numeric
-// cells are left completely untouched (never stringified/quoted), so totals still import
-// as real numbers, not text.
-export function sanitizeCell(v: string | number): string | number {
-  if (typeof v === 'number') return v
-  const s = String(v)
-  return /^[=+\-@\t\r]/.test(s) ? "'" + s : s
+/**
+ * CSV writer that neutralises spreadsheet formula injection.
+ *
+ * A cell beginning with = + - @ (or tab/CR, which Excel strips) is executed as
+ * a formula by Excel/Sheets/LibreOffice. We prefix such *text* cells with a
+ * single quote so they are shown literally. Numeric cells are written
+ * unquoted and unmodified so they stay numeric in the spreadsheet.
+ */
+const RISKY = /^[=+\-@\t\r]/
+
+export function escapeCsvCell(value: string | number): string {
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value)
+  let s = String(value ?? '')
+  if (RISKY.test(s)) s = "'" + s
+  return '"' + s.replace(/"/g, '""') + '"'
 }
 
 export function toCsv(rows: (string | number)[][]): string {
-  return rows.map((r) => r.map((c) => `"${String(sanitizeCell(c)).replace(/"/g, '""')}"`).join(',')).join('\n')
+  return rows.map((r) => r.map(escapeCsvCell).join(',')).join('\r\n')
 }

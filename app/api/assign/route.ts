@@ -1,13 +1,18 @@
 import { NextResponse } from 'next/server'
 import { getSql } from '@/lib/db'
-import { getCurrentUser, canWriteBusinessData } from '@/lib/authz'
+import { guarded } from '@/lib/auth-server'
 export const runtime = 'nodejs'
-export async function POST(req: Request) {
-  const actor = await getCurrentUser()
-  if (!canWriteBusinessData(actor)) return NextResponse.json({ error: 'You do not have permission to assign agents.' }, { status: 403 })
+
+export const POST = guarded('assignment.update', async (req) => {
   const b = await req.json().catch(() => ({}))
-  if (!b.customerId || !b.agentId) return NextResponse.json({ error: 'Customer and agent required.' }, { status: 400 })
+  const customerId = typeof b.customerId === 'string' ? b.customerId : ''
+  const agentId = typeof b.agentId === 'string' ? b.agentId : ''
+  if (!customerId || !agentId) return NextResponse.json({ error: 'Customer and agent are required.' }, { status: 400 })
   const sql = getSql()
-  await sql`update customers set agent_id = ${b.agentId} where id = ${b.customerId}`
+  const [customer] = await sql<{ id: string }[]>`select id from customers where id = ${customerId} limit 1`
+  if (!customer) return NextResponse.json({ error: 'Customer not found.' }, { status: 404 })
+  const [agent] = await sql<{ id: string }[]>`select id from users where id = ${agentId} and status = 'ACTIVE' limit 1`
+  if (!agent) return NextResponse.json({ error: 'Agent not found or inactive.' }, { status: 404 })
+  await sql`update customers set agent_id = ${agentId} where id = ${customerId}`
   return NextResponse.json({ ok: true })
-}
+})

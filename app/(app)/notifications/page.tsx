@@ -1,12 +1,10 @@
 import Link from 'next/link'
 import { getSql } from '@/lib/db'
-import { ensureSchemaOnce } from '@/lib/schema'
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 const money = (n: number) => '$' + Number(n || 0).toLocaleString()
 
 export default async function Notifications() {
-  await ensureSchemaOnce()
   const sql = getSql()
   const overdueFees = await sql<{ id: string; citation: string | null; official_no: string | null; customer_id: string; first_name: string; last_name: string; fee: string; paid: string; days: number }[]>`
     select k.id, k.citation, k.official_no, k.customer_id, c.first_name, c.last_name, k.fee,

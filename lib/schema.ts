@@ -1,4 +1,5 @@
 import { getSql } from './db'
+import bcrypt from 'bcryptjs'
 
 let ensured = false
 
@@ -43,6 +44,7 @@ create table if not exists documents (
 
 // Add every non-core column defensively so databases created by older versions get upgraded.
 const ALTER = `
+alter table users add column if not exists session_version integer not null default 0;
 alter table customers add column if not exists legacy_member_id text;
 alter table customers add column if not exists dob date;
 alter table customers add column if not exists email text;
@@ -93,12 +95,6 @@ alter table tasks add column if not exists status text default 'Open';
 
 alter table documents add column if not exists customer_id text;
 alter table documents add column if not exists case_id text;
-
--- Bumped whenever a password changes, or an admin changes a user's role/status. Any JWT
--- session issued before the bump immediately fails validation in getCurrentUser() — this
--- is what makes "disable a user" / "change a password" actually revoke existing sessions
--- instead of leaving them valid until natural (8h) expiry.
-alter table users add column if not exists token_version int not null default 0;
 `
 
 // Speeds up every list/dashboard/report page, which all filter or sort by these columns.
@@ -109,7 +105,6 @@ create index if not exists idx_cases_hearing_at on cases(hearing_at);
 create index if not exists idx_cases_next_action_at on cases(next_action_at);
 create index if not exists idx_cases_created_at on cases(created_at);
 create index if not exists idx_payments_customer_id on payments(customer_id);
-create index if not exists idx_payments_case_id on payments(case_id);
 create index if not exists idx_payments_paid_at on payments(paid_at);
 create index if not exists idx_tasks_customer_id on tasks(customer_id);
 create index if not exists idx_tasks_due_at on tasks(due_at);
@@ -120,18 +115,6 @@ create index if not exists idx_customers_created_at on customers(created_at);
 create index if not exists idx_customers_agent_id on customers(agent_id);
 `
 
-/**
- * Schema-only migration: tables, columns, indexes. No secrets, no account creation — this
- * is safe to run automatically from any request, which is what lets the app self-heal
- * across deploys without a manual migration step for ordinary schema changes.
- *
- * This deliberately does NOT create the initial Super Admin account anymore. That used to
- * happen here (and was also reachable via an unauthenticated GET /api/setup), which meant
- * an unauthenticated request against a freshly-provisioned database could create a
- * privileged account using a hardcoded fallback password. Initial account creation is now
- * exclusively handled by `scripts/setup.mjs`, run explicitly by whoever deploys the app,
- * with a required (not defaulted) SUPERADMIN_PASSWORD. See that script for details.
- */
 export async function ensureSchema(): Promise<void> {
   const sql = getSql()
   await sql.unsafe(CREATE)
@@ -140,10 +123,35 @@ export async function ensureSchema(): Promise<void> {
   ensured = true
 }
 
+/**
+ * Creates the first SUPER_ADMIN. Explicit, never automatic.
+ * Requires SUPERADMIN_EMAIL and a strong SUPERADMIN_PASSWORD; refuses to
+ * invent a default credential. Existing accounts are never overwritten.
+ */
+export async function seedSuperAdmin(): Promise<{ created: boolean; email: string }> {
+  const sql = getSql()
+  const email = (process.env.SUPERADMIN_EMAIL || '').trim().toLowerCase()
+  const password = process.env.SUPERADMIN_PASSWORD || ''
+  const name = process.env.SUPERADMIN_NAME || 'System Owner'
+  if (!email) throw new Error('SUPERADMIN_EMAIL is required to seed the first administrator.')
+  if (password.length < 12) throw new Error('SUPERADMIN_PASSWORD must be set and at least 12 characters.')
+
+  const existing = await sql`select id from users where email = ${email} limit 1`
+  if (existing.length > 0) return { created: false, email }
+
+  const anySuper = await sql`select id from users where role = 'SUPER_ADMIN' and status = 'ACTIVE' limit 1`
+  if (anySuper.length > 0) return { created: false, email }
+
+  const hash = await bcrypt.hash(password, 12)
+  await sql`insert into users (name, email, password_hash, role, status)
+    values (${name}, ${email}, ${hash}, 'SUPER_ADMIN', 'ACTIVE') on conflict (email) do nothing`
+  return { created: true, email }
+}
+
 // Bump this whenever CREATE/ALTER/INDEXES change. Lets a warm-but-reset or cold
 // serverless instance skip the (expensive, lock-taking) migration with a single
 // cheap primary-key lookup instead of re-running ~40 DDL statements on every request.
-const SCHEMA_VERSION = 'v4-token-version'
+const SCHEMA_VERSION = 'v4-session-version'
 
 export async function ensureSchemaOnce(): Promise<void> {
   if (ensured) return

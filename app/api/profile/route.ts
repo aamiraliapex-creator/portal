@@ -1,27 +1,37 @@
 import { NextResponse } from 'next/server'
 import { getSql } from '@/lib/db'
-import { getCurrentUser } from '@/lib/authz'
-import { createSession } from '@/lib/session'
+import { requireUser, authzResponse } from '@/lib/auth-server'
 import { hashPassword, verifyPassword } from '@/lib/password'
+import { createSession } from '@/lib/session'
 export const runtime = 'nodejs'
 
+const MIN_PASSWORD = 12
+
 export async function POST(req: Request) {
-  const actor = await getCurrentUser()
-  if (!actor) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-  const b = await req.json().catch(() => ({}))
-  if (!b.current || !b.next) return NextResponse.json({ error: 'Both fields are required.' }, { status: 400 })
-  if (String(b.next).length < 8) return NextResponse.json({ error: 'New password must be at least 8 characters.' }, { status: 400 })
+  try {
+    const me = await requireUser()
+    const b = await req.json().catch(() => ({}))
+    const current = typeof b.current === 'string' ? b.current : ''
+    const next = typeof b.next === 'string' ? b.next : ''
+    if (!current || !next) return NextResponse.json({ error: 'Both fields are required.' }, { status: 400 })
+    if (next.length < MIN_PASSWORD) return NextResponse.json({ error: `New password must be at least ${MIN_PASSWORD} characters.` }, { status: 400 })
+    if (next === current) return NextResponse.json({ error: 'Choose a password different from the current one.' }, { status: 400 })
 
-  const sql = getSql()
-  const [u] = await sql<{ password_hash: string; token_version: number }[]>`select password_hash, coalesce(token_version,0) as token_version from users where id = ${actor.id} limit 1`
-  if (!u || !(await verifyPassword(b.current, u.password_hash))) return NextResponse.json({ error: 'Current password is incorrect.' }, { status: 400 })
+    const sql = getSql()
+    const [u] = await sql<{ password_hash: string }[]>`select password_hash from users where id = ${me.id} limit 1`
+    if (!u || !(await verifyPassword(current, u.password_hash))) {
+      return NextResponse.json({ error: 'Current password is incorrect.' }, { status: 400 })
+    }
 
-  // Bumping token_version invalidates every session issued before this change — including,
-  // deliberately, this request's own current cookie. We immediately re-issue a fresh one
-  // below (with the new token_version) so the person changing their own password stays
-  // logged in, while any *other* session/device using the old password is logged out.
-  const newTokenVersion = u.token_version + 1
-  await sql`update users set password_hash = ${await hashPassword(b.next)}, token_version = ${newTokenVersion} where id = ${actor.id}`
-  await createSession({ id: actor.id, name: actor.name, email: actor.email, role: actor.role, tokenVersion: newTokenVersion })
-  return NextResponse.json({ ok: true })
+    // Bumping session_version invalidates every previously issued token for
+    // this account (including any stolen one), then we re-issue for this device.
+    const [updated] = await sql<{ session_version: number }[]>`
+      update users
+         set password_hash = ${await hashPassword(next)},
+             session_version = coalesce(session_version, 0) + 1
+       where id = ${me.id}
+       returning session_version`
+    await createSession({ id: me.id, name: me.name, email: me.email, role: me.role, sv: Number(updated.session_version) })
+    return NextResponse.json({ ok: true })
+  } catch (e) { return authzResponse(e) ?? NextResponse.json({ error: 'Request failed.' }, { status: 500 }) }
 }

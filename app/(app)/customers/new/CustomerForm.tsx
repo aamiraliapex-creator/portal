@@ -31,7 +31,7 @@ export default function CustomerForm({ agents }: { agents: { id: string; name: s
         <div className="card p-5">
           <p className="mb-3 text-[11px] font-bold uppercase tracking-wider text-brand-600">Membership &amp; Driver</p>
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-            <div><span className="lbl">Plan</span><select value={f.plan} onChange={(e)=>set('plan',e.target.value)} className="inp"><option>Fleet Protection ($39.99)</option><option>Individual Plan ($49.99)</option><option>One time Team</option></select></div>
+            <div><span className="lbl">Plan</span><select value={f.plan} onChange={(e)=>set('plan',e.target.value)} className="inp"><option value="Fleet Protection">Fleet Protection ($39.99)</option><option value="Individual Plan">Individual Plan ($49.99)</option><option value="One time Team">One time Team</option></select></div>
             <div><span className="lbl">Assigned agent</span><select value={f.agentId} onChange={(e)=>set('agentId',e.target.value)} className="inp">{agents.length===0 && <option value="">— none —</option>}{agents.map((a)=><option key={a.id} value={a.id}>{a.name}</option>)}</select></div>
             <div><span className="lbl">Subscription</span><select value={f.subStatus} onChange={(e)=>set('subStatus',e.target.value)} className="inp"><option>Active</option><option>Past due</option><option>Cancelled</option><option>None</option></select></div>
             <div><span className="lbl">CDL</span><select value={f.cdl} onChange={(e)=>set('cdl',e.target.value)} className="inp"><option>No</option><option>Yes</option></select></div>

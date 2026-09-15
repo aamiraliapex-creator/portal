@@ -1,6 +1,5 @@
 import Link from 'next/link'
 import { getSql } from '@/lib/db'
-import { ensureSchemaOnce } from '@/lib/schema'
 import { nextHoliday, holidayToday, fmtHoliday, daysUntil } from '@/lib/holidays'
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -21,7 +20,6 @@ function Donut({ segments, center, sub }: { segments: { v: number; c: string }[]
 }
 
 export default async function Dashboard() {
-  await ensureSchemaOnce()
   const sql = getSql()
   const [c] = await sql<{ total: number; active: number; newmonth: number }[]>`select count(*)::int total, count(*) filter (where sub_status='Active')::int active, count(*) filter (where coalesce(joined_at,created_at) >= date_trunc('month', now()))::int newmonth from customers`
   const [k] = await sql<{ total: number; open: number; needaction: number; active: number; waiting: number; resolved: number }[]>`select count(*)::int total, count(*) filter (where status not in ('Resolved','Dismissed'))::int open, count(*) filter (where status='Action Required')::int needaction, count(*) filter (where status in ('New','Action Required','Hearing Scheduled','Motion Prep','Under Review'))::int active, count(*) filter (where status='Waiting for Court')::int waiting, count(*) filter (where status in ('Resolved','Dismissed'))::int resolved from cases`

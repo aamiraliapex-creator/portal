@@ -10,17 +10,17 @@ export default function PaymentForm({ customers, cases }: { customers: Customer[
   const [form, setForm] = useState({ customerId: customers[0]?.id || '', kind: 'Membership', caseId: '', method: 'Card', amount: '', status: 'Paid' })
   const [error, setError] = useState('')
   const set = (k: string, v: string) => setForm((f) => {
-    // Changing the customer invalidates any previously-selected case (it belongs to the old
-    // customer), and switching away from "Case" no longer needs a case at all. Leaving the
-    // stale caseId in place let a mismatched or hidden selection get submitted silently.
-    if (k === 'customerId') return { ...f, customerId: v, caseId: '' }
-    if (k === 'kind' && v !== 'Case') return { ...f, kind: v, caseId: '' }
-    return { ...f, [k]: v }
+    const nextState = { ...f, [k]: v }
+    // A case selection is only valid for the customer it belongs to and only
+    // for a "Case" payment: clear it whenever either changes.
+    if (k === 'customerId' || k === 'kind') nextState.caseId = ''
+    return nextState
   })
   const custCases = cases.filter((c) => c.customer_id === form.customerId)
 
   async function submit(e: React.FormEvent) {
     e.preventDefault(); setError('')
+    if (form.kind === 'Case' && !form.caseId) { setError('Select the case this payment applies to.'); return }
     const res = await fetch('/api/payments', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(form) })
     if (res.ok) { router.push('/payments'); router.refresh() }
     else { const d = await res.json().catch(() => ({})); setError(d.error || 'Could not save.') }

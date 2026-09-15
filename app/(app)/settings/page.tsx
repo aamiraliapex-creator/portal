@@ -1,10 +1,8 @@
 import { getSql } from '@/lib/db'
-import { ensureSchemaOnce } from '@/lib/schema'
 import SettingsForm from './SettingsForm'
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 export default async function Settings() {
-  await ensureSchemaOnce()
   const sql = getSql()
   const rows = await sql<{ key: string; value: string }[]>`select key, value from settings`
   const initial: Record<string,string> = {}; rows.forEach((r)=>{ initial[r.key]=r.value })

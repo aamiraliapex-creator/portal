@@ -1,14 +1,16 @@
 import { NextResponse } from 'next/server'
 import { getSql } from '@/lib/db'
-import { ensureSchemaOnce } from '@/lib/schema'
-import { getSession } from '@/lib/session'
+import { getCurrentUser } from '@/lib/auth-server'
 export const runtime = 'nodejs'
 const money = (n: number) => '$' + Number(n || 0).toLocaleString()
 
 export async function GET() {
-  const s = await getSession(); if (!s) return NextResponse.json({ items: [] })
+  // Revoked sessions (disabled, deleted, password-changed) and anonymous callers
+  // must be refused outright: returning 200 with an empty list would mask
+  // revocation and leak the fact that the endpoint is reachable.
+  const s = await getCurrentUser()
+  if (!s) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   try {
-    await ensureSchemaOnce()
     const sql = getSql()
     const owing = await sql<{ citation: string | null; official_no: string | null; customer_id: string; first_name: string; last_name: string; fee: string; paid: string; days: number }[]>`
       select k.citation, k.official_no, k.customer_id, c.first_name, c.last_name, k.fee,

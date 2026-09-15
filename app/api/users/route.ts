@@ -1,93 +1,106 @@
 import { NextResponse } from 'next/server'
 import { getSql } from '@/lib/db'
-import { ensureSchemaOnce } from '@/lib/schema'
+import { requirePermission, authzResponse } from '@/lib/auth-server'
 import { hashPassword } from '@/lib/password'
-import { getCurrentUser, canManageUsers, canDeleteUsers, canManageRole, isRole, isStatus } from '@/lib/authz'
+import { canManageRole, isRole, isUserStatus, ROLE_RANK, type Role } from '@/lib/authz'
 export const runtime = 'nodejs'
 
+const MIN_PASSWORD = 12
+
+/** Number of OTHER active super admins (excluding `excludeId`). */
+async function otherActiveSuperAdmins(sql: ReturnType<typeof getSql>, excludeId: string): Promise<number> {
+  const [r] = await sql<{ n: number }[]>`
+    select count(*)::int n from users where role = 'SUPER_ADMIN' and status = 'ACTIVE' and id <> ${excludeId}`
+  return r?.n ?? 0
+}
+
 export async function POST(req: Request) {
-  const actor = await getCurrentUser()
-  if (!canManageUsers(actor)) return NextResponse.json({ error: 'Only an admin can add users.' }, { status: 403 })
-  await ensureSchemaOnce()
-  const b = await req.json().catch(() => ({}))
-  if (!b.name || !b.email || !b.password) return NextResponse.json({ error: 'Name, email and password are required.' }, { status: 400 })
-  if (String(b.password).length < 8) return NextResponse.json({ error: 'Password must be at least 8 characters.' }, { status: 400 })
-
-  const role = b.role || 'CASE_AGENT'
-  const status = b.status || 'ACTIVE'
-  if (!isRole(role)) return NextResponse.json({ error: 'Invalid role.' }, { status: 400 })
-  if (!isStatus(status)) return NextResponse.json({ error: 'Invalid status.' }, { status: 400 })
-  // Privilege escalation guard: an ADMIN cannot create an ADMIN or SUPER_ADMIN account —
-  // only a SUPER_ADMIN can create accounts at ADMIN rank or above.
-  if (!canManageRole(actor!, role)) return NextResponse.json({ error: 'You cannot create a user with that role.' }, { status: 403 })
-
-  const sql = getSql()
   try {
-    const [row] = await sql<{ id: string }[]>`
-      insert into users (name, email, password_hash, role, status)
-      values (${b.name}, ${String(b.email).toLowerCase()}, ${await hashPassword(b.password)}, ${role}, ${status})
-      returning id`
-    return NextResponse.json({ ok: true, id: row.id })
-  } catch { return NextResponse.json({ error: 'That email is already in use.' }, { status: 409 }) }
+    const actor = await requirePermission('user.manage')
+    const b = await req.json().catch(() => ({}))
+    const name = typeof b.name === 'string' ? b.name.trim() : ''
+    const email = typeof b.email === 'string' ? b.email.trim().toLowerCase() : ''
+    const password = typeof b.password === 'string' ? b.password : ''
+    const role = b.role ?? 'CASE_AGENT'
+    const status = b.status ?? 'ACTIVE'
+
+    if (!name || !email || !password) return NextResponse.json({ error: 'Name, email and password are required.' }, { status: 400 })
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return NextResponse.json({ error: 'Enter a valid email address.' }, { status: 400 })
+    if (password.length < MIN_PASSWORD) return NextResponse.json({ error: `Password must be at least ${MIN_PASSWORD} characters.` }, { status: 400 })
+    if (!isRole(role)) return NextResponse.json({ error: 'Unknown role.' }, { status: 400 })
+    if (!isUserStatus(status)) return NextResponse.json({ error: 'Unknown status.' }, { status: 400 })
+    // Allowlist + hierarchy: blocks ADMIN -> SUPER_ADMIN escalation.
+    if (!canManageRole(actor.role, role)) {
+      return NextResponse.json({ error: 'You cannot create an account with that role.' }, { status: 403 })
+    }
+
+    const sql = getSql()
+    try {
+      const [row] = await sql<{ id: string }[]>`
+        insert into users (name, email, password_hash, role, status)
+        values (${name}, ${email}, ${await hashPassword(password)}, ${role}, ${status})
+        returning id`
+      return NextResponse.json({ ok: true, id: row.id })
+    } catch {
+      return NextResponse.json({ error: 'That email is already in use.' }, { status: 409 })
+    }
+  } catch (e) { return authzResponse(e) ?? NextResponse.json({ error: 'Request failed.' }, { status: 500 }) }
 }
 
 export async function PATCH(req: Request) {
-  const actor = await getCurrentUser()
-  if (!canManageUsers(actor)) return NextResponse.json({ error: 'Not allowed.' }, { status: 403 })
-  const b = await req.json().catch(() => ({}))
-  if (!b.id) return NextResponse.json({ error: 'id required' }, { status: 400 })
-  if (b.status !== undefined && !isStatus(b.status)) return NextResponse.json({ error: 'Invalid status.' }, { status: 400 })
-  if (b.role !== undefined && !isRole(b.role)) return NextResponse.json({ error: 'Invalid role.' }, { status: 400 })
-  if (b.status === undefined && b.role === undefined) return NextResponse.json({ error: 'Nothing to update.' }, { status: 400 })
+  try {
+    const actor = await requirePermission('user.manage')
+    const b = await req.json().catch(() => ({}))
+    const id = typeof b.id === 'string' ? b.id : ''
+    const status = b.status
+    if (!id || !isUserStatus(status)) return NextResponse.json({ error: 'A user id and a valid status are required.' }, { status: 400 })
 
-  const sql = getSql()
-  const [target] = await sql<{ id: string; role: string; status: string }[]>`select id, role, status from users where id = ${b.id} limit 1`
-  if (!target) return NextResponse.json({ error: 'User not found.' }, { status: 404 })
+    const sql = getSql()
+    const [target] = await sql<{ id: string; role: string; status: string }[]>`
+      select id, role, status from users where id = ${id} limit 1`
+    if (!target) return NextResponse.json({ error: 'User not found.' }, { status: 404 })
+    if (!isRole(target.role)) return NextResponse.json({ error: 'User has an invalid role.' }, { status: 409 })
 
-  // An actor can only manage accounts at or below their own rank (SUPER_ADMIN excepted) —
-  // this stops an ADMIN from disabling, re-enabling, or re-role-ing another ADMIN or a
-  // SUPER_ADMIN, and stops assigning a role above what the actor is allowed to grant.
-  if (!canManageRole(actor!, target.role)) return NextResponse.json({ error: 'You cannot manage this account.' }, { status: 403 })
-  if (b.role !== undefined && !canManageRole(actor!, b.role)) return NextResponse.json({ error: 'You cannot assign that role.' }, { status: 403 })
+    // An actor may never modify an account at or above their own privilege level
+    // (self-service lives in /api/profile).
+    if (target.id === actor.id) return NextResponse.json({ error: 'You cannot change your own status here.' }, { status: 400 })
+    if (!canManageRole(actor.role, target.role)) {
+      return NextResponse.json({ error: 'You cannot manage an account with that role.' }, { status: 403 })
+    }
+    // Never strand the system without an active super admin.
+    if (target.role === 'SUPER_ADMIN' && status === 'DISABLED' && (await otherActiveSuperAdmins(sql, target.id)) === 0) {
+      return NextResponse.json({ error: 'Cannot disable the last active super admin.' }, { status: 409 })
+    }
 
-  // Never allow the last active Super Admin to be disabled or demoted — that would lock
-  // the whole org out of the highest privilege tier with no way back in short of direct
-  // database access.
-  const wouldRemoveLastSuperAdmin =
-    target.role === 'SUPER_ADMIN' &&
-    target.status === 'ACTIVE' &&
-    ((b.status !== undefined && b.status !== 'ACTIVE') || (b.role !== undefined && b.role !== 'SUPER_ADMIN'))
-  if (wouldRemoveLastSuperAdmin) {
-    const [{ count }] = await sql<{ count: string }[]>`select count(*)::text as count from users where role = 'SUPER_ADMIN' and status = 'ACTIVE'`
-    if (Number(count) <= 1) return NextResponse.json({ error: 'You cannot disable or demote the last active Super Admin.' }, { status: 400 })
-  }
-
-  // Changing role or status revokes any session already issued for this account — bumping
-  // token_version makes every existing JWT for this user fail getCurrentUser()'s check on
-  // its very next request, instead of staying valid until natural (8h) expiry.
-  await sql`update users set
-      status = coalesce(${b.status ?? null}, status),
-      role = coalesce(${b.role ?? null}, role),
-      token_version = token_version + 1
-    where id = ${b.id}`
-  return NextResponse.json({ ok: true })
+    // Disabling also revokes existing sessions for that account.
+    if (status === 'DISABLED') {
+      await sql`update users set status = ${status}, session_version = coalesce(session_version,0) + 1 where id = ${id}`
+    } else {
+      await sql`update users set status = ${status} where id = ${id}`
+    }
+    return NextResponse.json({ ok: true })
+  } catch (e) { return authzResponse(e) ?? NextResponse.json({ error: 'Request failed.' }, { status: 500 }) }
 }
 
 export async function DELETE(req: Request) {
-  const actor = await getCurrentUser()
-  if (!canDeleteUsers(actor)) return NextResponse.json({ error: 'Only a Super Admin can delete users.' }, { status: 403 })
-  const { searchParams } = new URL(req.url)
-  const id = searchParams.get('id')
-  if (!id) return NextResponse.json({ error: 'id required' }, { status: 400 })
-  if (id === actor!.id) return NextResponse.json({ error: 'You cannot delete your own account.' }, { status: 400 })
+  try {
+    const actor = await requirePermission('user.delete')
+    const id = new URL(req.url).searchParams.get('id')
+    if (!id) return NextResponse.json({ error: 'A user id is required.' }, { status: 400 })
+    if (id === actor.id) return NextResponse.json({ error: 'You cannot delete your own account.' }, { status: 400 })
 
-  const sql = getSql()
-  const [target] = await sql<{ role: string; status: string }[]>`select role, status from users where id = ${id} limit 1`
-  if (!target) return NextResponse.json({ error: 'User not found.' }, { status: 404 })
-  if (target.role === 'SUPER_ADMIN' && target.status === 'ACTIVE') {
-    const [{ count }] = await sql<{ count: string }[]>`select count(*)::text as count from users where role = 'SUPER_ADMIN' and status = 'ACTIVE'`
-    if (Number(count) <= 1) return NextResponse.json({ error: 'You cannot delete the last active Super Admin.' }, { status: 400 })
-  }
-  await sql`delete from users where id = ${id}`
-  return NextResponse.json({ ok: true })
+    const sql = getSql()
+    const [target] = await sql<{ id: string; role: string }[]>`select id, role from users where id = ${id} limit 1`
+    if (!target) return NextResponse.json({ error: 'User not found.' }, { status: 404 })
+    if (!isRole(target.role)) return NextResponse.json({ error: 'User has an invalid role.' }, { status: 409 })
+    if (target.role === 'SUPER_ADMIN' && (await otherActiveSuperAdmins(sql, target.id)) === 0) {
+      return NextResponse.json({ error: 'Cannot delete the last active super admin.' }, { status: 409 })
+    }
+    if (ROLE_RANK[actor.role] > ROLE_RANK[target.role as Role]) {
+      return NextResponse.json({ error: 'You cannot delete a more privileged account.' }, { status: 403 })
+    }
+
+    await sql`delete from users where id = ${id}`
+    return NextResponse.json({ ok: true })
+  } catch (e) { return authzResponse(e) ?? NextResponse.json({ error: 'Request failed.' }, { status: 500 }) }
 }

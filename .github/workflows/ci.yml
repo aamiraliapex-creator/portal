@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  push:
+    branches: [main, 'security-**', 'validation-**']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# Least privilege: CI only needs to read the repository.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Typecheck, unit tests, build, audit
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20.x'
+          cache: npm
+
+      - run: npm ci
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Unit tests
+        run: npm test
+
+      - name: Production build
+        # Build-time placeholders only — no real secrets, no real database.
+        env:
+          AUTH_SECRET: ci-build-placeholder-secret-not-used-at-runtime
+          DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/placeholder?sslmode=disable
+        run: npm run build
+
+      - name: Dependency audit (fails on high/critical)
+        run: npm audit --audit-level=high
+
+  integration:
+    name: Integration tests (isolated database)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: portal_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # Disposable database created by the service container above.
+      TEST_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/portal_test?sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20.x'
+          cache: npm
+
+      - run: npm ci
+      - name: Integration suite (provisions schema via CLI, then builds and tests)
+        run: npm run test:integration

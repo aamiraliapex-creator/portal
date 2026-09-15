@@ -20,11 +20,22 @@ function pickUrl(): string | undefined {
   return url
 }
 
+/**
+ * TLS mode derived from the connection string.
+ * Defaults to 'require' (managed Postgres such as Neon), but honours an
+ * explicit sslmode=disable so a local/self-hosted instance without TLS can be
+ * used for development and tests. Previously ssl was hardcoded to 'require',
+ * which made any sslmode=disable URL fail to connect.
+ */
+function sslModeFor(url: string): 'require' | false {
+  return /[?&]sslmode=disable(&|$)/i.test(url) ? false : 'require'
+}
+
 export function getSql() {
   const url = pickUrl()
-  if (!url) throw new Error('No database URL found. Set DATABASE_URL in Vercel → Settings → Environment Variables, then Redeploy.')
+  if (!url) throw new Error('No database URL found. Set DATABASE_URL in the deployment environment.')
   if (!global._sql) {
-    global._sql = postgres(url, { ssl: 'require', prepare: false, max: 10, idle_timeout: 20, connect_timeout: 30 })
+    global._sql = postgres(url, { ssl: sslModeFor(url), prepare: false, max: 10, idle_timeout: 20, connect_timeout: 30 })
   }
   return global._sql
 }

@@ -1,32 +1,33 @@
 import { NextResponse } from 'next/server'
 import { getSql } from '@/lib/db'
-import { ensureSchemaOnce } from '@/lib/schema'
-import { getCurrentUser, canWriteBusinessData } from '@/lib/authz'
+import { guarded } from '@/lib/auth-server'
 export const runtime = 'nodejs'
 
+const PRIORITIES = ['Low', 'Normal', 'High'] as const
 const STATUSES = ['Open', 'In Progress', 'Completed', 'Canceled'] as const
 
-export async function POST(req: Request) {
-  const actor = await getCurrentUser()
-  if (!canWriteBusinessData(actor)) return NextResponse.json({ error: 'You do not have permission to create tasks.' }, { status: 403 })
-  await ensureSchemaOnce()
+export const POST = guarded('task.create', async (req) => {
   const b = await req.json().catch(() => ({}))
-  if (!b.title) return NextResponse.json({ error: 'Title is required.' }, { status: 400 })
+  const title = typeof b.title === 'string' ? b.title.trim() : ''
+  if (!title) return NextResponse.json({ error: 'Title is required.' }, { status: 400 })
+  const priority = (PRIORITIES as readonly string[]).includes(b.priority) ? b.priority : 'Normal'
+  let dueAt: Date | null = null
+  if (b.dueAt) { const d = new Date(b.dueAt); if (isNaN(d.getTime())) return NextResponse.json({ error: 'Invalid due date.' }, { status: 400 }); dueAt = d }
   const sql = getSql()
   const [row] = await sql<{ id: string }[]>`
     insert into tasks (title, case_ref, assignee, due_at, priority, status)
-    values (${b.title}, ${b.caseRef || null}, ${b.assignee || null}, ${b.dueAt ? new Date(b.dueAt) : null}, ${b.priority || 'Normal'}, 'Open')
+    values (${title}, ${b.caseRef || null}, ${b.assignee || null}, ${dueAt}, ${priority}, 'Open')
     returning id`
   return NextResponse.json({ ok: true, id: row.id })
-}
+})
 
-export async function PATCH(req: Request) {
-  const actor = await getCurrentUser()
-  if (!canWriteBusinessData(actor)) return NextResponse.json({ error: 'You do not have permission to update tasks.' }, { status: 403 })
+export const PATCH = guarded('task.update', async (req) => {
   const b = await req.json().catch(() => ({}))
-  if (!b.id || !b.status) return NextResponse.json({ error: 'id and status required' }, { status: 400 })
-  if (!(STATUSES as readonly string[]).includes(b.status)) return NextResponse.json({ error: 'Invalid status.' }, { status: 400 })
+  const id = typeof b.id === 'string' ? b.id : ''
+  if (!id || !(STATUSES as readonly string[]).includes(b.status)) {
+    return NextResponse.json({ error: 'A task id and a valid status are required.' }, { status: 400 })
+  }
   const sql = getSql()
-  await sql`update tasks set status = ${b.status} where id = ${b.id}`
+  await sql`update tasks set status = ${b.status} where id = ${id}`
   return NextResponse.json({ ok: true })
-}
+})

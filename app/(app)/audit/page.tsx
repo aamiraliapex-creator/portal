@@ -1,9 +1,7 @@
 import { getSql } from '@/lib/db'
-import { ensureSchemaOnce } from '@/lib/schema'
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 export default async function Audit() {
-  await ensureSchemaOnce()
   const sql = getSql()
   const rows = await sql<{ occurred_at: string; label: string }[]>`
     (select created_at as occurred_at, 'Customer added: ' || first_name || ' ' || last_name as label from customers order by created_at desc limit 25)

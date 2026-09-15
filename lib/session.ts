@@ -1,36 +1,21 @@
 import { SignJWT, jwtVerify } from 'jose'
 import { cookies } from 'next/headers'
+import { authSecretKey } from './env'
 
 const COOKIE = 'clp_session'
+export const SESSION_COOKIE = COOKIE
 
-// AUTH_SECRET must be set in production. We never silently sign/verify sessions with a
-// publicly-known fallback in production — that would let anyone forge a valid session token.
-// In local development only, we fall back to a clearly-marked insecure secret so `next dev`
-// keeps working out of the box, and we warn loudly so it's never mistaken for a real config.
-let warned = false
-function secret() {
-  const s = process.env.AUTH_SECRET
-  if (s && s.length >= 16) return new TextEncoder().encode(s)
-  if (process.env.NODE_ENV === 'production') {
-    throw new Error(
-      'AUTH_SECRET is not set (or is too short). Set a strong random AUTH_SECRET (32+ bytes, e.g. `openssl rand -base64 32`) ' +
-      'in your production environment before serving traffic. Refusing to start with an insecure default.'
-    )
-  }
-  if (!warned) { console.warn('[security] AUTH_SECRET is not set — using an insecure development-only secret. Never deploy this to production.'); warned = true }
-  return new TextEncoder().encode('dev-only-insecure-secret-DO-NOT-USE-IN-PRODUCTION-32B')
-}
+/** Claims embedded in the JWT. `sv` is the session version used for revocation. */
+export type SessionClaims = { id: string; name: string; email: string; role: string; sv: number }
 
-export type SessionUser = { id: string; name: string; email: string; role: string; tokenVersion: number }
-
-export async function createSession(user: SessionUser) {
-  const token = await new SignJWT({ id: user.id, name: user.name, email: user.email, role: user.role, tv: user.tokenVersion })
+export async function createSession(user: SessionClaims) {
+  const token = await new SignJWT({ ...user })
     .setProtectedHeader({ alg: 'HS256' })
     .setIssuedAt()
     .setExpirationTime('8h')
-    .sign(secret())
-  const store = await cookies()
-  store.set(COOKIE, token, {
+    .sign(authSecretKey())
+  const jar = await cookies()
+  jar.set(COOKIE, token, {
     httpOnly: true,
     secure: process.env.NODE_ENV === 'production',
     sameSite: 'lax',
@@ -39,36 +24,35 @@ export async function createSession(user: SessionUser) {
   })
 }
 
-export async function readToken(token?: string): Promise<SessionUser | null> {
+/** Verifies signature/expiry only. Does NOT prove the account is still active. */
+export async function readToken(token?: string): Promise<SessionClaims | null> {
   if (!token) return null
   try {
-    const { payload } = await jwtVerify(token, secret())
+    const { payload } = await jwtVerify(token, authSecretKey())
+    if (!payload.id) return null
     return {
       id: String(payload.id),
-      name: String(payload.name),
-      email: String(payload.email),
-      role: String(payload.role),
-      tokenVersion: Number(payload.tv ?? 0),
+      name: String(payload.name ?? ''),
+      email: String(payload.email ?? ''),
+      role: String(payload.role ?? ''),
+      sv: Number(payload.sv ?? 0),
     }
   } catch {
     return null
   }
 }
 
-// Cheap, stateless check of "is this a well-formed, signed, unexpired token" — this is what
-// middleware uses for a fast edge-side redirect. It intentionally does NOT reflect whether the
-// account has since been disabled, deleted, or had its password changed. For any authorization
-// decision (not just "are you logged in"), use `getCurrentUser()` from lib/authz.ts instead,
-// which re-checks the database on every call.
-export async function getSession(): Promise<SessionUser | null> {
-  const store = await cookies()
-  return readToken(store.get(COOKIE)?.value)
+/**
+ * Token-only claims. Kept for internal use; prefer getCurrentUser() from
+ * lib/auth-server.ts for anything that authorises an action, because claims
+ * are stale after disable/delete/role-change/password-change.
+ */
+export async function getSessionClaims(): Promise<SessionClaims | null> {
+  const jar = await cookies()
+  return readToken(jar.get(COOKIE)?.value)
 }
 
 export async function clearSession() {
-  const store = await cookies()
-  store.set(COOKIE, '', { path: '/', maxAge: 0 })
+  const jar = await cookies()
+  jar.set(COOKIE, '', { path: '/', maxAge: 0 })
 }
-
-export const SESSION_COOKIE = COOKIE
-export const isSuperAdmin = (u: SessionUser | null) => u?.role === 'SUPER_ADMIN'

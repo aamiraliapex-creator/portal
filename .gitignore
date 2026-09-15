@@ -3,3 +3,12 @@ node_modules
 .env
 .env*.local
 .DS_Store
+
+# build artifacts
+tsconfig.tsbuildinfo
+
+# build artifacts
+tsconfig.tsbuildinfo
+
+# build artifacts
+tsconfig.tsbuildinfo
