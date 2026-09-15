@@ -1,6 +1,7 @@
 'use client'
 import { useState } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
+import { safeNextPath } from '@/lib/safe-redirect'
 
 export default function LoginForm() {
   const router = useRouter()
@@ -14,7 +15,11 @@ export default function LoginForm() {
     e.preventDefault(); setError(''); setLoading(true)
     const res = await fetch('/api/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, password }) })
     setLoading(false)
-    if (res.ok) { const raw = params.get('next') || '/dashboard'; router.push(raw.startsWith('/') && !raw.startsWith('//') ? raw : '/dashboard'); router.refresh() }
+    if (res.ok) {
+      const dest = safeNextPath(params.get('next'), window.location.origin)
+      router.push(dest)
+      router.refresh()
+    }
     else { const d = await res.json().catch(() => ({})); setError(d.error || 'Invalid credentials.') }
   }
 

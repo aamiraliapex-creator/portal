@@ -7,7 +7,6 @@
 | `AUTH_SECRET` | yes | >= 32 chars. Sessions cannot be signed or verified without it; `proxy.ts` returns **503** and API calls fail rather than falling back to a default. |
 | `DATABASE_URL` | yes | `sslmode=require` for managed Postgres. `sslmode=disable` is honoured for local development only. |
 | `DIRECT_URL` | for migrations | Unpooled URL used by `npm run db:setup`. |
-| `SETUP_TOKEN` | only while provisioning | >= 32 chars. When unset, `POST /api/setup` returns 404. |
 | `SUPERADMIN_EMAIL` / `SUPERADMIN_PASSWORD` | first install only | Password must be >= 12 chars. No default credential exists. |
 
 ## Permission matrix
@@ -49,11 +48,58 @@ DOCUMENT_STAFF handles files; READ_ONLY has **no** write permission anywhere.
 * `proxy.ts` is a cheap first gate only (signature/expiry). It is **not** the authorisation boundary.
 
 ## Provisioning
-Migrations never run from ordinary page or API traffic. Use either:
-1. `npm run db:setup` (recommended), or
-2. `POST /api/setup` with `x-setup-token: $SETUP_TOKEN`, then unset `SETUP_TOKEN`.
+Schema creation and migration happen **only** through the CLI:
+
+```
+npm run db:setup      # applies CREATE/ALTER/INDEX statements, optionally seeds the first admin
+```
+
+There is **no HTTP provisioning endpoint**. `/api/setup` does not exist and must not
+be reintroduced: `lib/schema.ts` deliberately exports no runtime helpers, so DDL
+cannot be executed from a page, layout, middleware/proxy or API route. Migrations
+are run by an operator (or the CI job) against `DIRECT_URL`, never by request traffic.
 
 ## Exports
 CSV only. Cells beginning with `= + - @` tab or CR are prefixed with `'` to prevent
 spreadsheet formula injection; finite numbers are written unquoted so they stay numeric.
 No endpoint labels CSV bytes as `.xls`/`.xlsx`.
+
+## Login rate limiting
+
+Application level (implemented):
+* 5 failed attempts per email address trigger a 15-minute lockout, applied even
+  when the correct password is supplied afterwards.
+* The counter is incremented **atomically** in one statement
+  (`attempts = login_attempts.attempts + 1 ... RETURNING`), so concurrent
+  requests cannot overwrite each other and reset progress toward the lockout.
+* Rows untouched for 24 hours are pruned on each failed attempt (an active
+  lockout is never pruned), so failed logins against unknown addresses cannot
+  grow `login_attempts` without bound. Backed by
+  `login_attempts_updated_at_idx`.
+* Every attempt runs a real bcrypt comparison — against a fixed dummy hash when
+  the account is missing or disabled — so unknown and known accounts follow
+  approximately the same path.
+
+Platform level (**must be configured separately — not provided by this code**):
+the per-email limiter does nothing against a distributed attack spread across
+many addresses, and it can be abused to lock out a known user on purpose.
+Add an IP/edge limiter in front of `POST /api/auth/login`:
+* **Vercel** — enable WAF rate limiting, or Vercel Firewall rules on that path.
+* **Cloudflare** — a Rate Limiting rule (for example 10 requests / 10 minutes / IP).
+* Self-hosted — `limit_req` in nginx or an equivalent reverse-proxy limiter.
+
+Because the app sits behind a proxy, do not rate limit on a client-supplied
+`X-Forwarded-For` value in application code; use the platform's own limiter,
+which sees the real connecting address.
+
+## Password policy
+
+* bcrypt considers only the first 72 **bytes**; passwords longer than that are
+  **rejected** at account creation and password change rather than truncated,
+  so two values sharing a 72-byte prefix can never be interchangeable.
+* Length is measured in UTF-8 bytes, not characters.
+* Submitted passwords above 1024 bytes are refused outright to bound hashing
+  work per request.
+* Migrating to Argon2id would remove the 72-byte constraint entirely; it is not
+  done here because it adds a native dependency. The limit is enforced
+  consistently in the meantime.

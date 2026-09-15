@@ -1,7 +1,3 @@
-import { getSql } from './db'
-import bcrypt from 'bcryptjs'
-
-let ensured = false
 
 const CREATE = `
 create table if not exists users (
@@ -99,6 +95,7 @@ alter table documents add column if not exists case_id text;
 
 // Speeds up every list/dashboard/report page, which all filter or sort by these columns.
 const INDEXES = `
+create index if not exists login_attempts_updated_at_idx on login_attempts (updated_at);
 create index if not exists idx_cases_customer_id on cases(customer_id);
 create index if not exists idx_cases_status on cases(status);
 create index if not exists idx_cases_hearing_at on cases(hearing_at);
@@ -115,58 +112,13 @@ create index if not exists idx_customers_created_at on customers(created_at);
 create index if not exists idx_customers_agent_id on customers(agent_id);
 `
 
-export async function ensureSchema(): Promise<void> {
-  const sql = getSql()
-  await sql.unsafe(CREATE)
-  await sql.unsafe(ALTER)
-  await sql.unsafe(INDEXES)
-  ensured = true
-}
-
 /**
- * Creates the first SUPER_ADMIN. Explicit, never automatic.
- * Requires SUPERADMIN_EMAIL and a strong SUPERADMIN_PASSWORD; refuses to
- * invent a default credential. Existing accounts are never overwritten.
+ * NOTE: this module intentionally exports NO runtime helpers.
+ *
+ * Schema creation and migration are CLI/CI-only operations performed by
+ * scripts/setup.mjs, which reads the CREATE / ALTER / INDEXES blocks above
+ * directly from this file. Deliberately keeping no exported
+ * ensureSchema()/ensureSchemaOnce()/seedSuperAdmin() function means DDL
+ * cannot be re-introduced into request handling by a stray import.
  */
-export async function seedSuperAdmin(): Promise<{ created: boolean; email: string }> {
-  const sql = getSql()
-  const email = (process.env.SUPERADMIN_EMAIL || '').trim().toLowerCase()
-  const password = process.env.SUPERADMIN_PASSWORD || ''
-  const name = process.env.SUPERADMIN_NAME || 'System Owner'
-  if (!email) throw new Error('SUPERADMIN_EMAIL is required to seed the first administrator.')
-  if (password.length < 12) throw new Error('SUPERADMIN_PASSWORD must be set and at least 12 characters.')
-
-  const existing = await sql`select id from users where email = ${email} limit 1`
-  if (existing.length > 0) return { created: false, email }
-
-  const anySuper = await sql`select id from users where role = 'SUPER_ADMIN' and status = 'ACTIVE' limit 1`
-  if (anySuper.length > 0) return { created: false, email }
-
-  const hash = await bcrypt.hash(password, 12)
-  await sql`insert into users (name, email, password_hash, role, status)
-    values (${name}, ${email}, ${hash}, 'SUPER_ADMIN', 'ACTIVE') on conflict (email) do nothing`
-  return { created: true, email }
-}
-
-// Bump this whenever CREATE/ALTER/INDEXES change. Lets a warm-but-reset or cold
-// serverless instance skip the (expensive, lock-taking) migration with a single
-// cheap primary-key lookup instead of re-running ~40 DDL statements on every request.
-const SCHEMA_VERSION = 'v4-session-version'
-
-export async function ensureSchemaOnce(): Promise<void> {
-  if (ensured) return
-  const sql = getSql()
-  try {
-    const [row] = await sql<{ value: string }[]>`select value from settings where key = 'schema_version' limit 1`
-    if (row?.value === SCHEMA_VERSION) { ensured = true; return }
-  } catch {
-    // settings table may not exist yet (first-ever run) — fall through to full migration below.
-  }
-  try {
-    await ensureSchema()
-    await sql`insert into settings (key, value) values ('schema_version', ${SCHEMA_VERSION})
-      on conflict (key) do update set value = excluded.value, updated_at = now()`
-  } catch (e) {
-    console.error('ensureSchema failed:', e)
-  }
-}
+export {}

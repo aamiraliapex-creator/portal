@@ -1,14 +1,12 @@
 import { NextResponse } from 'next/server'
 import { getSql } from '@/lib/db'
 import { guarded } from '@/lib/auth-server'
+import { isAssignableAgentRole } from '@/lib/authz'
 import {
   PLANS, SUB_STATUSES, PAY_CHANNELS, YES_NO, LIMITS,
   pickEnum, parseText, parseDateOnly, firstError,
 } from '@/lib/validation'
 export const runtime = 'nodejs'
-
-/** Roles that may own a customer record as its agent. */
-const ASSIGNABLE_AGENT_ROLES = ['SUPER_ADMIN', 'ADMIN', 'MANAGER', 'CASE_AGENT', 'SALES_AGENT']
 
 export const POST = guarded('customer.create', async (req) => {
   const b = await req.json().catch(() => ({}))
@@ -51,7 +49,7 @@ export const POST = guarded('customer.create', async (req) => {
     const [agent] = await sql<{ id: string; role: string }[]>`
       select id, role from users where id = ${b.agentId.trim()} and status = 'ACTIVE' limit 1`
     if (!agent) return NextResponse.json({ error: 'Assigned agent not found or inactive.' }, { status: 400 })
-    if (!ASSIGNABLE_AGENT_ROLES.includes(agent.role)) {
+    if (!isAssignableAgentRole(agent.role)) {
       return NextResponse.json({ error: 'That user cannot be assigned as an agent.' }, { status: 400 })
     }
     agentId = agent.id

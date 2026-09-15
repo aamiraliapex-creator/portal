@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server'
 import { getSql } from '@/lib/db'
 import { requireUser, authzResponse } from '@/lib/auth-server'
-import { hashPassword, verifyPassword } from '@/lib/password'
+import { hashPassword, verifyPassword, isWithinBcryptLimit, BCRYPT_MAX_BYTES } from '@/lib/password'
 import { createSession } from '@/lib/session'
 export const runtime = 'nodejs'
 
@@ -15,6 +15,7 @@ export async function POST(req: Request) {
     const next = typeof b.next === 'string' ? b.next : ''
     if (!current || !next) return NextResponse.json({ error: 'Both fields are required.' }, { status: 400 })
     if (next.length < MIN_PASSWORD) return NextResponse.json({ error: `New password must be at least ${MIN_PASSWORD} characters.` }, { status: 400 })
+    if (!isWithinBcryptLimit(next)) return NextResponse.json({ error: `New password must be at most ${BCRYPT_MAX_BYTES} bytes.` }, { status: 400 })
     if (next === current) return NextResponse.json({ error: 'Choose a password different from the current one.' }, { status: 400 })
 
     const sql = getSql()

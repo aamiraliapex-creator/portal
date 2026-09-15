@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server'
 import { getSql } from '@/lib/db'
 import { guarded } from '@/lib/auth-server'
+import { isAssignableAgentRole } from '@/lib/authz'
 export const runtime = 'nodejs'
 
 export const POST = guarded('assignment.update', async (req) => {
@@ -11,8 +12,11 @@ export const POST = guarded('assignment.update', async (req) => {
   const sql = getSql()
   const [customer] = await sql<{ id: string }[]>`select id from customers where id = ${customerId} limit 1`
   if (!customer) return NextResponse.json({ error: 'Customer not found.' }, { status: 404 })
-  const [agent] = await sql<{ id: string }[]>`select id from users where id = ${agentId} and status = 'ACTIVE' limit 1`
+  const [agent] = await sql<{ id: string; role: string }[]>`select id, role from users where id = ${agentId} and status = 'ACTIVE' limit 1`
   if (!agent) return NextResponse.json({ error: 'Agent not found or inactive.' }, { status: 404 })
+  if (!isAssignableAgentRole(agent.role)) {
+    return NextResponse.json({ error: 'That user cannot be assigned as an agent.' }, { status: 400 })
+  }
   await sql`update customers set agent_id = ${agentId} where id = ${customerId}`
   return NextResponse.json({ ok: true })
 })

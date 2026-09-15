@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server'
 import { getSql } from '@/lib/db'
 import { guarded } from '@/lib/auth-server'
+import { isAssignableAgentRole } from '@/lib/authz'
 import { stateToTz } from '@/lib/timezones'
 import {
   CASE_STATUSES, CASE_PRIORITIES, TRISTATE, HEARING_TYPES, PREP_STATUSES, LIMITS,
@@ -51,9 +52,12 @@ export const POST = guarded('case.create', async (req) => {
 
   let agentId: string | null = null
   if (typeof b.agentId === 'string' && b.agentId.trim() !== '') {
-    const [agent] = await sql<{ id: string }[]>`
-      select id from users where id = ${b.agentId.trim()} and status = 'ACTIVE' limit 1`
+    const [agent] = await sql<{ id: string; role: string }[]>`
+      select id, role from users where id = ${b.agentId.trim()} and status = 'ACTIVE' limit 1`
     if (!agent) return NextResponse.json({ error: 'Assigned agent not found or inactive.' }, { status: 400 })
+    if (!isAssignableAgentRole(agent.role)) {
+      return NextResponse.json({ error: 'That user cannot be assigned as an agent.' }, { status: 400 })
+    }
     agentId = agent.id
   }
 

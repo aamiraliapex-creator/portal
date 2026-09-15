@@ -68,3 +68,17 @@ export function canManageRole(actorRole: string, targetRole: string): boolean {
   // Otherwise the actor must be strictly more privileged than the target.
   return ROLE_RANK[actorRole] < ROLE_RANK[targetRole]
 }
+
+/**
+ * Roles that may own a customer or a case as its assigned agent.
+ * Single source of truth: used by the customers, cases and assign APIs and by
+ * the agent-selection queries that populate their dropdowns, so the UI can
+ * never offer a user the API would reject.
+ */
+export const ASSIGNABLE_AGENT_ROLES: readonly Role[] = [
+  'SUPER_ADMIN', 'ADMIN', 'MANAGER', 'CASE_AGENT', 'SALES_AGENT',
+]
+
+export function isAssignableAgentRole(role: unknown): role is Role {
+  return isRole(role) && ASSIGNABLE_AGENT_ROLES.includes(role)
+}

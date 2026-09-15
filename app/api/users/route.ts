@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server'
 import { getSql } from '@/lib/db'
 import { requirePermission, authzResponse } from '@/lib/auth-server'
-import { hashPassword } from '@/lib/password'
+import { hashPassword, isWithinBcryptLimit, BCRYPT_MAX_BYTES } from '@/lib/password'
 import { canManageRole, isRole, isUserStatus, ROLE_RANK, type Role } from '@/lib/authz'
 export const runtime = 'nodejs'
 
@@ -27,6 +27,8 @@ export async function POST(req: Request) {
     if (!name || !email || !password) return NextResponse.json({ error: 'Name, email and password are required.' }, { status: 400 })
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return NextResponse.json({ error: 'Enter a valid email address.' }, { status: 400 })
     if (password.length < MIN_PASSWORD) return NextResponse.json({ error: `Password must be at least ${MIN_PASSWORD} characters.` }, { status: 400 })
+    // bcrypt ignores anything past 72 bytes; reject rather than silently truncate.
+    if (!isWithinBcryptLimit(password)) return NextResponse.json({ error: `Password must be at most ${BCRYPT_MAX_BYTES} bytes.` }, { status: 400 })
     if (!isRole(role)) return NextResponse.json({ error: 'Unknown role.' }, { status: 400 })
     if (!isUserStatus(status)) return NextResponse.json({ error: 'Unknown status.' }, { status: 400 })
     // Allowlist + hierarchy: blocks ADMIN -> SUPER_ADMIN escalation.

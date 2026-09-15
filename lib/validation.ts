@@ -115,3 +115,21 @@ export function firstError(...results: Result<unknown>[]): string | null {
   for (const r of results) if (!r.ok) return r.error
   return null
 }
+
+/** RFC 5321 caps an address at 254 characters. */
+export const EMAIL_MAX_LENGTH = 254
+
+/** Trim + lowercase. Does not validate. */
+export function normalizeEmail(raw: string): string {
+  return raw.trim().toLowerCase()
+}
+
+/**
+ * Pragmatic syntax check: one @, no whitespace, a dot-bearing domain, and
+ * within the RFC length limit. Deliberately conservative rather than clever.
+ */
+export function isValidEmail(value: string): boolean {
+  if (typeof value !== 'string') return false
+  if (value.length === 0 || value.length > EMAIL_MAX_LENGTH) return false
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)
+}

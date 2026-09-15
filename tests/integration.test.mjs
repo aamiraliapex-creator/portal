@@ -342,16 +342,23 @@ test('a DELETED account cannot read /api/notifications with its existing session
 })
 
 test('a password change invalidates previously issued sessions for /api/notifications reads', async () => {
-  const oldCookie = await ensureUser('notif-rotate@example.test', 'CASE_AGENT')
-  assert.equal((await api('/api/notifications', oldCookie, 'GET')).status, 200)
+  // Session A is captured BEFORE the change; session B performs the change.
+  // Checking only the fresh cookie would pass even if revocation were broken.
+  const EMAIL = 'notif-rotate@example.test'
+  const sessionA = await ensureUser(EMAIL, 'CASE_AGENT')
+  assert.equal((await api('/api/notifications', sessionA, 'GET')).status, 200, 'sanity: session A works first')
 
-  const changed = await api('/api/profile', oldCookie, 'POST', { current: PW, next: 'Rotated-Passw0rd!2026' })
+  const sessionB = await login(EMAIL, PW)
+  assert.equal(sessionB.status, 200)
+  const changed = await api('/api/profile', sessionB.cookie, 'POST', { current: PW, next: 'Rotated-Passw0rd!2026' })
   assert.equal(changed.status, 200, await changed.text())
 
-  const fresh = await login('notif-rotate@example.test', 'Rotated-Passw0rd!2026')
+  const stale = await api('/api/notifications', sessionA, 'GET')
+  assert.ok([401, 403].includes(stale.status), `the pre-change session must be rejected, got ${stale.status}`)
+
+  const fresh = await login(EMAIL, 'Rotated-Passw0rd!2026')
   assert.equal(fresh.status, 200)
-  const after = await api('/api/notifications', fresh.cookie, 'GET')
-  assert.equal(after.status, 200, 'the newly issued session still works')
+  assert.equal((await api('/api/notifications', fresh.cookie, 'GET')).status, 200, 'a newly issued session works')
 })
 
 // ------------------------------------------- input validation writes no rows
@@ -457,4 +464,204 @@ test('every plan value the customer form can submit is accepted by the API', asy
   // And a label-style value (what the old form submitted) must still be rejected.
   const labelled = await api('/api/customers', (await owner()), 'POST', { firstName: 'Plan', lastName: 'Label', plan: 'Fleet Protection ($39.99)' })
   assert.equal(labelled.status, 400, 'a price-labelled plan value must not be accepted')
+})
+
+// --------------------------- agent assignment uses ONE shared role allowlist
+// READ_ONLY, BILLING and DOCUMENT_STAFF must never become a customer's or a
+// case's agent, through any endpoint, and a rejected attempt must not write.
+const NON_ASSIGNABLE = ['READ_ONLY', 'BILLING', 'DOCUMENT_STAFF']
+
+test('non-assignable roles are rejected as the agent on /api/customers (no row written)', async () => {
+  const [{ n: before }] = await sql`select count(*)::int n from customers`
+  for (const role of NON_ASSIGNABLE) {
+    const email = `noassign-cust-${role.toLowerCase()}@example.test`
+    await ensureUser(email, role)
+    const [u] = await sql`select id from users where email = ${email}`
+    const r = await api('/api/customers', (await owner()), 'POST', { firstName: 'No', lastName: 'Assign', agentId: u.id })
+    assert.equal(r.status, 400, `${role} must not be assignable on customers (got ${r.status})`)
+  }
+  const [{ n: after }] = await sql`select count(*)::int n from customers`
+  assert.equal(after, before, 'a rejected assignment must not create a customer')
+})
+
+test('non-assignable roles are rejected as the agent on /api/cases (no row written)', async () => {
+  const [c] = await sql`insert into customers (first_name,last_name) values ('Agent','CaseCheck') returning id`
+  const [{ n: before }] = await sql`select count(*)::int n from cases`
+  for (const role of NON_ASSIGNABLE) {
+    const email = `noassign-case-${role.toLowerCase()}@example.test`
+    await ensureUser(email, role)
+    const [u] = await sql`select id from users where email = ${email}`
+    const r = await api('/api/cases', (await owner()), 'POST', { customerId: c.id, citation: 'NOASSIGN-1', agentId: u.id })
+    assert.equal(r.status, 400, `${role} must not be assignable on cases (got ${r.status})`)
+  }
+  const [{ n: after }] = await sql`select count(*)::int n from cases`
+  assert.equal(after, before, 'a rejected assignment must not create a case')
+})
+
+test('non-assignable roles are rejected on /api/assign and the customer keeps its agent', async () => {
+  const agentCookieEmail = 'assignable-agent@example.test'
+  await ensureUser(agentCookieEmail, 'CASE_AGENT')
+  const [good] = await sql`select id from users where email = ${agentCookieEmail}`
+  const [c] = await sql`insert into customers (first_name,last_name,agent_id) values ('Assign','Target',${good.id}) returning id`
+
+  for (const role of NON_ASSIGNABLE) {
+    const email = `noassign-assign-${role.toLowerCase()}@example.test`
+    await ensureUser(email, role)
+    const [u] = await sql`select id from users where email = ${email}`
+    const r = await api('/api/assign', (await owner()), 'POST', { customerId: c.id, agentId: u.id })
+    assert.equal(r.status, 400, `${role} must not be assignable via /api/assign (got ${r.status})`)
+  }
+
+  const [row] = await sql`select agent_id from customers where id = ${c.id}`
+  assert.equal(row.agent_id, good.id, 'a rejected assignment must not change the stored agent')
+})
+
+test('an assignable role (CASE_AGENT) still works through /api/assign', async () => {
+  await ensureUser('assign-ok@example.test', 'CASE_AGENT')
+  const [u] = await sql`select id from users where email = 'assign-ok@example.test'`
+  const [c] = await sql`insert into customers (first_name,last_name) values ('Assign','Ok') returning id`
+  const r = await api('/api/assign', (await owner()), 'POST', { customerId: c.id, agentId: u.id })
+  assert.equal(r.status, 200, await r.text())
+  const [row] = await sql`select agent_id from customers where id = ${c.id}`
+  assert.equal(row.agent_id, u.id)
+})
+
+// ---------------------------------------------------------------------------
+// Login hardening
+// ---------------------------------------------------------------------------
+test('concurrent failed logins increment the counter atomically (no lost updates)', async () => {
+  const EMAIL = 'concurrency@example.test'
+  await sql`delete from login_attempts where email = ${EMAIL}`
+
+  // Fire the failures simultaneously. A read-then-write counter would let these
+  // overwrite each other and record fewer than 5 attempts.
+  const N = 5
+  await Promise.all(Array.from({ length: N }, () =>
+    fetch(`${BASE}/api/auth/login`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: EMAIL, password: 'definitely-wrong' }),
+    })))
+
+  const [row] = await sql`select attempts, locked_until from login_attempts where email = ${EMAIL}`
+  assert.ok(row, 'an attempts row must exist')
+  assert.equal(Number(row.attempts), N, `expected exactly ${N} recorded attempts, got ${row.attempts}`)
+  assert.ok(row.locked_until, 'reaching the threshold must set a lockout')
+})
+
+test('a locked account is refused with 429 even with the correct password', async () => {
+  const EMAIL = 'lockout@example.test'
+  const cookieUser = await ensureUser(EMAIL, 'CASE_AGENT')
+  assert.ok(cookieUser)
+  await sql`delete from login_attempts where email = ${EMAIL}`
+
+  for (let i = 0; i < 5; i++) {
+    const r = await login(EMAIL, 'wrong-password')
+    assert.equal(r.status, 401)
+  }
+  const blocked = await login(EMAIL, PW)
+  assert.equal(blocked.status, 429, 'the lockout must apply even to a valid password')
+
+  await sql`delete from login_attempts where email = ${EMAIL}`
+})
+
+test('stale login_attempts rows are pruned so unknown-email spam cannot grow the table', async () => {
+  // A stale unknown-email row, older than the 24h TTL and not locked.
+  await sql`delete from login_attempts where email in ('stale@example.test','fresh-trigger@example.test')`
+  await sql`insert into login_attempts (email, attempts, locked_until, updated_at)
+            values ('stale@example.test', 2, null, now() - interval '48 hours')`
+  const [before] = await sql`select count(*)::int n from login_attempts where email = 'stale@example.test'`
+  assert.equal(before.n, 1, 'precondition: stale row exists')
+
+  // Any failed login runs the bounded cleanup.
+  await login('fresh-trigger@example.test', 'wrong-password')
+
+  const [after] = await sql`select count(*)::int n from login_attempts where email = 'stale@example.test'`
+  assert.equal(after.n, 0, 'the stale row must be pruned')
+
+  const [recent] = await sql`select count(*)::int n from login_attempts where email = 'fresh-trigger@example.test'`
+  assert.equal(recent.n, 1, 'the recent row must be kept')
+  await sql`delete from login_attempts where email = 'fresh-trigger@example.test'`
+})
+
+test('a recently locked row is NOT pruned even if it is old', async () => {
+  await sql`delete from login_attempts where email = 'old-but-locked@example.test'`
+  await sql`insert into login_attempts (email, attempts, locked_until, updated_at)
+            values ('old-but-locked@example.test', 5, now() + interval '10 minutes', now() - interval '48 hours')`
+  await login('prune-trigger2@example.test', 'wrong-password')
+  const [row] = await sql`select count(*)::int n from login_attempts where email = 'old-but-locked@example.test'`
+  assert.equal(row.n, 1, 'an active lockout must survive pruning')
+  await sql`delete from login_attempts where email in ('old-but-locked@example.test','prune-trigger2@example.test')`
+})
+
+test('login rejects malformed input before touching the database', async () => {
+  const bad = [
+    { email: 123, password: 'x' },
+    { email: 'a@b.test', password: {} },
+    { email: 'not-an-email', password: 'whatever' },
+    { email: '   ', password: 'whatever' },
+    { email: 'a'.repeat(300) + '@example.test', password: 'whatever' },
+  ]
+  for (const body of bad) {
+    const r = await fetch(`${BASE}/api/auth/login`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    })
+    assert.ok([400, 401].includes(r.status), `${JSON.stringify(body).slice(0, 40)} -> ${r.status}`)
+    const text = await r.text()
+    assert.ok(!/at |Error|stack|postgres/i.test(text) || /credentials|required/i.test(text),
+      'error text must stay generic')
+  }
+})
+
+test('login normalises the email: mixed case and surrounding spaces still sign in', async () => {
+  const r = await login('  OWNER@Example.TEST  '.trim().toUpperCase(), 'TestOwnerPassw0rd!')
+  assert.equal(r.status, 200, 'an uppercase address must resolve to the same account')
+})
+
+test('an over-long password is rejected at account creation (bcrypt 72-byte limit)', async () => {
+  const r = await api('/api/users', (await owner()), 'POST', {
+    name: 'Long Password', email: 'longpw@example.test', password: 'a'.repeat(73), role: 'CASE_AGENT',
+  })
+  assert.equal(r.status, 400, 'a >72-byte password must not be silently truncated')
+  const [{ n }] = await sql`select count(*)::int n from users where email = 'longpw@example.test'`
+  assert.equal(n, 0, 'no user row may be created')
+})
+
+test('an over-long password is rejected on password change', async () => {
+  const cookie = await ensureUser('longpw-change@example.test', 'CASE_AGENT')
+  const r = await api('/api/profile', cookie, 'POST', { current: PW, next: 'b'.repeat(73) })
+  assert.equal(r.status, 400)
+})
+
+// ---------------------------------------------------------------------------
+// Task validation
+// ---------------------------------------------------------------------------
+test('task fields are length-limited and strictly typed', async () => {
+  const cookie = await owner()
+  const [{ n: before }] = await sql`select count(*)::int n from tasks`
+  for (const body of [
+    { title: 'x'.repeat(5000) },
+    { title: 'ok', caseRef: 'y'.repeat(5000) },
+    { title: 'ok', assignee: 'z'.repeat(5000) },
+    { title: 'ok', priority: 'Critical' },
+    { title: 'ok', dueAt: 'not-a-date' },
+    { title: '   ' },
+  ]) {
+    const r = await api('/api/tasks', cookie, 'POST', body)
+    assert.equal(r.status, 400, `${JSON.stringify(body).slice(0, 40)} -> ${r.status}`)
+  }
+  const [{ n: after }] = await sql`select count(*)::int n from tasks`
+  assert.equal(after, before, 'no task row may be written by a rejected request')
+})
+
+test('PATCH /api/tasks returns 404 for an unknown task id', async () => {
+  const cookie = await owner()
+  const r = await api('/api/tasks', cookie, 'PATCH', { id: '00000000-0000-0000-0000-000000000000', status: 'Completed' })
+  assert.equal(r.status, 404, 'a missing task must be a 404, not a silent 200')
+
+  const created = await api('/api/tasks', cookie, 'POST', { title: 'Patch target' })
+  const { id } = await created.json()
+  const ok = await api('/api/tasks', cookie, 'PATCH', { id, status: 'Completed' })
+  assert.equal(ok.status, 200)
+  const [row] = await sql`select status from tasks where id = ${id}`
+  assert.equal(row.status, 'Completed')
 })

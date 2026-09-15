@@ -37,22 +37,3 @@ export function authSecretKey(): Uint8Array {
 export function hasAuthSecret(): boolean {
   try { requireAuthSecret(); return true } catch { return false }
 }
-
-/** Setup/provisioning token used to authorise migration endpoints. */
-export function requireSetupToken(): string {
-  const raw = process.env.SETUP_TOKEN
-  if (!raw || raw.trim().length < MIN_SECRET_LENGTH) {
-    throw new ConfigError(`SETUP_TOKEN must be set and at least ${MIN_SECRET_LENGTH} characters to run provisioning.`)
-  }
-  return raw
-}
-
-/** Constant-time string comparison (avoids leaking token content via timing). */
-export function safeEqual(a: string, b: string): boolean {
-  const ab = new TextEncoder().encode(a)
-  const bb = new TextEncoder().encode(b)
-  if (ab.length !== bb.length) return false
-  let diff = 0
-  for (let i = 0; i < ab.length; i++) diff |= ab[i] ^ bb[i]
-  return diff === 0
-}

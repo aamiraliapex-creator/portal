@@ -1,5 +1,6 @@
 import Link from 'next/link'
 import { getSql } from '@/lib/db'
+import { ASSIGNABLE_AGENT_ROLES } from '@/lib/authz'
 import AssignPanel from './AssignPanel'
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -25,7 +26,10 @@ export default async function Agents({ searchParams: searchParamsInput }: { sear
   const top = rows[0]
 
   const custList = await sql<{ id: string; name: string }[]>`select id, (first_name||' '||last_name) name from customers order by created_at desc limit 500`
-  const agentList = await sql<{ id: string; name: string }[]>`select id, name from users where status='ACTIVE' order by name`
+  const agentList = await sql<{ id: string; name: string }[]>`
+    select id, name from users
+    where status='ACTIVE' and role = any(${ASSIGNABLE_AGENT_ROLES as unknown as string[]})
+    order by name`
 
   // drill-down
   let drill: React.ReactNode = null

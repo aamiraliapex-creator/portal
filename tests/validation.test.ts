@@ -112,3 +112,18 @@ test('every plan option value in the customer form is in the API PLANS allowlist
   // The visible label must NOT be a valid submitted value.
   assert.equal(pickEnum('Fleet Protection ($39.99)', PLANS, null, 'plan').ok, false)
 })
+
+// ---------------------------------------------------------------- email input
+test('normalizeEmail trims and lowercases', async () => {
+  const { normalizeEmail } = await import('../lib/validation')
+  assert.equal(normalizeEmail('  Owner@Example.TEST  '), 'owner@example.test')
+})
+
+test('isValidEmail accepts sane addresses and rejects malformed/oversized ones', async () => {
+  const { isValidEmail, EMAIL_MAX_LENGTH } = await import('../lib/validation')
+  assert.equal(isValidEmail('owner@example.test'), true)
+  for (const bad of ['', 'no-at-sign', 'two@@at.test', 'spaces in@mail.test', 'trailing@dot', '@example.test']) {
+    assert.equal(isValidEmail(bad), false, `${bad} must be rejected`)
+  }
+  assert.equal(isValidEmail('a'.repeat(EMAIL_MAX_LENGTH) + '@example.test'), false)
+})
