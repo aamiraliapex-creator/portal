@@ -529,41 +529,6 @@ test('an assignable role (CASE_AGENT) still works through /api/assign', async ()
 // ---------------------------------------------------------------------------
 // Login hardening
 // ---------------------------------------------------------------------------
-test('concurrent failed logins increment the counter atomically (no lost updates)', async () => {
-  const EMAIL = 'concurrency@example.test'
-  await sql`delete from login_attempts where email = ${EMAIL}`
-
-  // Fire the failures simultaneously. A read-then-write counter would let these
-  // overwrite each other and record fewer than 5 attempts.
-  const N = 5
-  await Promise.all(Array.from({ length: N }, () =>
-    fetch(`${BASE}/api/auth/login`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email: EMAIL, password: 'definitely-wrong' }),
-    })))
-
-  const [row] = await sql`select attempts, locked_until from login_attempts where email = ${EMAIL}`
-  assert.ok(row, 'an attempts row must exist')
-  assert.equal(Number(row.attempts), N, `expected exactly ${N} recorded attempts, got ${row.attempts}`)
-  assert.ok(row.locked_until, 'reaching the threshold must set a lockout')
-})
-
-test('a locked account is refused with 429 even with the correct password', async () => {
-  const EMAIL = 'lockout@example.test'
-  const cookieUser = await ensureUser(EMAIL, 'CASE_AGENT')
-  assert.ok(cookieUser)
-  await sql`delete from login_attempts where email = ${EMAIL}`
-
-  for (let i = 0; i < 5; i++) {
-    const r = await login(EMAIL, 'wrong-password')
-    assert.equal(r.status, 401)
-  }
-  const blocked = await login(EMAIL, PW)
-  assert.equal(blocked.status, 429, 'the lockout must apply even to a valid password')
-
-  await sql`delete from login_attempts where email = ${EMAIL}`
-})
-
 test('stale login_attempts rows are pruned so unknown-email spam cannot grow the table', async () => {
   // A stale unknown-email row, older than the 24h TTL and not locked.
   await sql`delete from login_attempts where email in ('stale@example.test','fresh-trigger@example.test')`
@@ -664,4 +629,106 @@ test('PATCH /api/tasks returns 404 for an unknown task id', async () => {
   assert.equal(ok.status, 200)
   const [row] = await sql`select status from tasks where id = ${id}`
   assert.equal(row.status, 'Completed')
+})
+
+// ---------------------------------------------------------------------------
+// Admission control: the limiter must cap password VERIFICATIONS, not just
+// record failures afterwards. A burst must not slip past an "unlocked" read.
+// ---------------------------------------------------------------------------
+test('a burst of 20 simultaneous wrong-password logins admits at most 5 and 429s the rest', async () => {
+  const EMAIL = 'burst@example.test'
+  await sql`delete from login_attempts where email = ${EMAIL}`
+  await sql`delete from users where email = ${EMAIL}`
+  const cookie = await ensureUser(EMAIL, 'CASE_AGENT')
+  assert.ok(cookie)
+  await sql`delete from login_attempts where email = ${EMAIL}`
+
+  const N = 20
+  const results = await Promise.all(Array.from({ length: N }, () =>
+    fetch(`${BASE}/api/auth/login`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: EMAIL, password: 'definitely-wrong' }),
+    }).then((r) => r.status)))
+
+  const admitted = results.filter((s) => s === 401).length
+  const throttled = results.filter((s) => s === 429).length
+
+  assert.ok(admitted <= 5, `at most 5 verifications may be admitted, got ${admitted}`)
+  assert.equal(admitted + throttled, N, `every request must be 401 or 429 (got ${JSON.stringify(results)})`)
+  assert.ok(throttled >= N - 5, `later requests must be throttled, got ${throttled}`)
+
+  const [row] = await sql`select attempts, locked_until from login_attempts where email = ${EMAIL}`
+  assert.equal(Number(row.attempts), admitted, 'the stored counter must equal the number admitted')
+  assert.ok(Number(row.attempts) <= 5, 'the counter must never exceed the threshold')
+  assert.ok(row.locked_until, 'the account must end up locked')
+})
+
+test('a correct password submitted concurrently after the threshold cannot bypass the lock', async () => {
+  const EMAIL = 'bypass@example.test'
+  await sql`delete from login_attempts where email = ${EMAIL}`
+  await sql`delete from users where email = ${EMAIL}`
+  await ensureUser(EMAIL, 'CASE_AGENT')
+  await sql`delete from login_attempts where email = ${EMAIL}`
+
+  // Exhaust the window.
+  for (let i = 0; i < 5; i++) await login(EMAIL, 'wrong-password')
+
+  // Now fire correct-password attempts concurrently: all must be refused.
+  const results = await Promise.all(Array.from({ length: 8 }, () => login(EMAIL, PW).then((r) => r.status)))
+  assert.ok(results.every((s) => s === 429), `all must be 429 while locked, got ${JSON.stringify(results)}`)
+
+  const [row] = await sql`select attempts from login_attempts where email = ${EMAIL}`
+  assert.ok(Number(row.attempts) <= 5, 'denied requests must not increment the counter')
+})
+
+test('requests during an active lock do not extend locked_until', async () => {
+  const EMAIL = 'noextend@example.test'
+  await sql`delete from login_attempts where email = ${EMAIL}`
+  await sql`insert into login_attempts (email, attempts, locked_until, updated_at)
+            values (${EMAIL}, 5, now() + interval '5 minutes', now())`
+  const [before] = await sql`select locked_until from login_attempts where email = ${EMAIL}`
+
+  for (let i = 0; i < 5; i++) {
+    const r = await login(EMAIL, 'wrong-password')
+    assert.equal(r.status, 429)
+  }
+
+  const [after] = await sql`select locked_until, attempts from login_attempts where email = ${EMAIL}`
+  assert.equal(new Date(after.locked_until).toISOString(), new Date(before.locked_until).toISOString(),
+    'hammering a locked account must not push the unlock time further out')
+  assert.equal(Number(after.attempts), 5, 'denied attempts must not be counted')
+  await sql`delete from login_attempts where email = ${EMAIL}`
+})
+
+test('after a lock expires the next wrong attempt starts a fresh window at attempt 1', async () => {
+  const EMAIL = 'expired@example.test'
+  await sql`delete from login_attempts where email = ${EMAIL}`
+  // A lock that has already elapsed.
+  await sql`insert into login_attempts (email, attempts, locked_until, updated_at)
+            values (${EMAIL}, 5, now() - interval '1 minute', now() - interval '20 minutes')`
+
+  const r = await login(EMAIL, 'wrong-password')
+  assert.equal(r.status, 401, 'the first attempt after expiry must be admitted, not refused')
+
+  const [row] = await sql`select attempts, locked_until from login_attempts where email = ${EMAIL}`
+  assert.equal(Number(row.attempts), 1, `a fresh window must start at 1, got ${row.attempts}`)
+  assert.equal(row.locked_until, null, 'one failure must not immediately re-lock the account')
+  await sql`delete from login_attempts where email = ${EMAIL}`
+})
+
+test('a successful login clears the attempt counter', async () => {
+  const EMAIL = 'clears@example.test'
+  await sql`delete from login_attempts where email = ${EMAIL}`
+  await sql`delete from users where email = ${EMAIL}`
+  await ensureUser(EMAIL, 'CASE_AGENT')
+
+  await login(EMAIL, 'wrong-password')
+  await login(EMAIL, 'wrong-password')
+  const [mid] = await sql`select attempts from login_attempts where email = ${EMAIL}`
+  assert.ok(Number(mid.attempts) >= 2)
+
+  const ok = await login(EMAIL, PW)
+  assert.equal(ok.status, 200)
+  const rows = await sql`select 1 from login_attempts where email = ${EMAIL}`
+  assert.equal(rows.length, 0, 'a successful login must delete the counter row')
 })

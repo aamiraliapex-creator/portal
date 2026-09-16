@@ -67,11 +67,22 @@ No endpoint labels CSV bytes as `.xls`/`.xlsx`.
 ## Login rate limiting
 
 Application level (implemented):
-* 5 failed attempts per email address trigger a 15-minute lockout, applied even
-  when the correct password is supplied afterwards.
-* The counter is incremented **atomically** in one statement
-  (`attempts = login_attempts.attempts + 1 ... RETURNING`), so concurrent
-  requests cannot overwrite each other and reset progress toward the lockout.
+* **Admission control runs before bcrypt.** Each request reserves an attempt
+  slot in `lib/login-limiter.ts` first; only an admitted request has its
+  password verified. Checking `locked_until`, then hashing, then counting the
+  failure afterwards would let a simultaneous burst pass the "unlocked" read
+  and test many passwords before the counter reached the threshold.
+* Reservations are **serialized per normalized email** with a transaction-scoped
+  advisory lock (`pg_advisory_xact_lock`), so concurrent requests queue and each
+  gets a distinct attempt number. The lock is released at commit — bcrypt runs
+  outside it.
+* At most **5 password verifications** per active window; the 6th and beyond get
+  429 **without their password being tested**.
+* An **active lock is never extended** by further requests, and those requests
+  are not counted, so hammering cannot keep an account locked indefinitely.
+* When a lock expires (or the window goes quiet for 15 minutes) the next failure
+  starts a **fresh window at attempt 1** rather than immediately re-locking.
+* A successful login **deletes** the counter row.
 * Rows untouched for 24 hours are pruned on each failed attempt (an active
   lockout is never pruned), so failed logins against unknown addresses cannot
   grow `login_attempts` without bound. Backed by
