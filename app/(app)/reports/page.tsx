@@ -1,9 +1,15 @@
+import { requirePageAccess } from '@/lib/ownership'
+import NotAvailable from '../NotAvailable'
 import Link from 'next/link'
 import { getSql } from '@/lib/db'
 import ExportButtons from './ExportButtons'
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 const money = (n: number) => '$' + Number(n || 0).toLocaleString()
+
+/** Report types that expose money and therefore need canSeeMoney(). */
+import { canViewReportType, FINANCIAL_REPORT_TYPES } from '@/lib/authz'
+const FINANCIAL_REPORTS = FINANCIAL_REPORT_TYPES as readonly string[]
 
 const REPORTS: [string, string][] = [
   ['status', 'Cases by Status'], ['agent', 'Cases by Agent'], ['custagent', 'Customers by Agent'],
@@ -16,9 +22,20 @@ function Bars({ pairs }: { pairs: [string, number][] }) {
 }
 
 export default async function Reports({ searchParams: searchParamsInput }: { searchParams: Promise<{ r?: string }> }) {
+  const scope = await requirePageAccess('report.view')
+  if (!scope) return <NotAvailable />
   const searchParams = await searchParamsInput
   const sql = getSql()
-  const r = REPORTS.find(([k]) => k === searchParams.r)?.[0] || 'status'
+  // Scoped roles must not receive organisation-wide report data.
+  // Each report type is checked independently: financial access never opens
+  // organisation-wide operational reports, and vice versa.
+  const visibleReports = REPORTS.filter(([k]) => canViewReportType(scope.user.role, k))
+  if (visibleReports.length === 0) return <NotAvailable note="Reports are not available for your role." />
+  const requested = REPORTS.find(([k]) => k === searchParams.r)?.[0] || visibleReports[0][0]
+  if (!canViewReportType(scope.user.role, requested)) {
+    return <NotAvailable note="That report is not available for your role." />
+  }
+  const r = requested
   const title = REPORTS.find(([k]) => k === r)![1]
 
   let content: React.ReactNode = null
@@ -44,7 +61,7 @@ export default async function Reports({ searchParams: searchParamsInput }: { sea
       </div>
       <div className="mt-4 grid gap-4 lg:grid-cols-[280px_1fr]">
         <div className="card p-2">
-          {REPORTS.map(([k, label]) => (
+          {visibleReports.map(([k, label]) => (
             <Link key={k} href={`/reports?r=${k}`} className={'block rounded-lg px-3 py-2 text-sm font-medium ' + (r === k ? 'bg-brand-50 text-brand-700' : 'text-slate-600 hover:bg-slate-50')}>{label}</Link>
           ))}
         </div>

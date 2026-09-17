@@ -1,3 +1,5 @@
+import { requirePageAccess } from '@/lib/ownership'
+import NotAvailable from '../NotAvailable'
 import Link from 'next/link'
 import { getSql } from '@/lib/db'
 import { ASSIGNABLE_AGENT_ROLES } from '@/lib/authz'
@@ -9,6 +11,8 @@ const money = (n: number) => '$' + Number(n || 0).toLocaleString()
 type Row = { id: string; name: string; customers: number; active: number; cancelled: number; cases: number; collected: string }
 
 export default async function Agents({ searchParams: searchParamsInput }: { searchParams: Promise<{ from?: string; to?: string; agent?: string }> }) {
+  const scope = await requirePageAccess('assignment.update', { money: true })
+  if (!scope) return <NotAvailable />
   const searchParams = await searchParamsInput
   const sql = getSql()
   const from = searchParams.from || null

@@ -6,9 +6,10 @@ import {
   PLANS, SUB_STATUSES, PAY_CHANNELS, YES_NO, LIMITS,
   pickEnum, parseText, parseDateOnly, firstError,
 } from '@/lib/validation'
+import { initialApprovalStatus } from '@/lib/authz'
 export const runtime = 'nodejs'
 
-export const POST = guarded('customer.create', async (req) => {
+export const POST = guarded('customer.create', async (req, actor) => {
   const b = await req.json().catch(() => ({}))
 
   const firstName = parseText(b.firstName, LIMITS.shortText, 'First name')
@@ -56,8 +57,8 @@ export const POST = guarded('customer.create', async (req) => {
   }
 
   const [row] = await sql<{ id: string }[]>`
-    insert into customers (legacy_member_id, first_name, last_name, dob, email, phone, state, plan, pay_channel, cdl, license_no, dot, sub_status, next_payment, agent_id)
-    values (${'M-' + Math.floor(1000 + Math.random() * 9000)}, ${firstName.value}, ${lastName.value}, ${dob.value ?? null}, ${email.value ?? null}, ${phone.value ?? null}, ${state.value ?? null},
+    insert into customers (approval_status, created_by, legacy_member_id, first_name, last_name, dob, email, phone, state, plan, pay_channel, cdl, license_no, dot, sub_status, next_payment, agent_id)
+    values (${initialApprovalStatus(actor.role)}, ${actor.id}, ${'M-' + Math.floor(1000 + Math.random() * 9000)}, ${firstName.value}, ${lastName.value}, ${dob.value ?? null}, ${email.value ?? null}, ${phone.value ?? null}, ${state.value ?? null},
             ${plan.value ?? null}, ${payChannel.value ?? null}, ${cdl.value ?? 'No'}, ${licenseNo.value ?? null}, ${dot.value ?? 'No'},
             ${subStatus.value ?? 'Active'}, ${nextPayment.value ?? null}, ${agentId})
     returning id`

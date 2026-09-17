@@ -3,9 +3,9 @@ import { useRouter } from 'next/navigation'
 import { useState } from 'react'
 import { stateToTz, localInputToUtcIso } from '@/lib/timezones'
 type Customer = { id: string; first_name: string; last_name: string; legacy_member_id?: string | null }
-export default function CaseForm({ customers, agents }: { customers: Customer[]; agents: { id: string; name: string }[] }) {
+export default function CaseForm({ customers, agents, showMoney = false }: { customers: Customer[]; agents: { id: string; name: string }[]; showMoney?: boolean }) {
   const router = useRouter()
-  const [f, setF] = useState({ customerId: customers[0]?.id || '', citation: '', officialNo: '', ticket: '', state: '', court: '', violationDate: '', cmv: 'Unknown', cdl: 'Unknown', fine: '', fee: '', agentId: '', priority: 'Normal', status: 'New', hearingAt: '', hearingType: 'In person', prepStatus: 'Not started' })
+  const [f, setF] = useState({ customerId: customers[0]?.id || '', citation: '', officialNo: '', ticket: '', state: '', court: '', courtPhone: '', violationDate: '', cmv: 'Unknown', cdl: 'Unknown', fine: '', fee: '', agentId: '', priority: 'Normal', status: 'New', hearingAt: '', hearingType: 'In person', prepStatus: 'Not started' })
   const [error, setError] = useState('')
   const set = (k: string, v: string) => setF((s) => ({ ...s, [k]: v }))
   async function submit(e: React.FormEvent) {
@@ -37,11 +37,14 @@ export default function CaseForm({ customers, agents }: { customers: Customer[];
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
             <div><span className="lbl">State</span><input value={f.state} onChange={(e)=>set('state',e.target.value)} className="inp" /></div>
             <div><span className="lbl">Court name</span><input value={f.court} onChange={(e)=>set('court',e.target.value)} className="inp" /></div>
+            <div><span className="lbl">Court phone number</span><input type="tel" value={f.courtPhone} onChange={(e)=>set('courtPhone',e.target.value)} className="inp" placeholder="e.g. (253) 555-0142" /></div>
             <div><span className="lbl">Violation date</span><input type="date" value={f.violationDate} onChange={(e)=>set('violationDate',e.target.value)} className="inp" /></div>
             <div><span className="lbl">CMV involved</span><select value={f.cmv} onChange={(e)=>set('cmv',e.target.value)} className="inp"><option>Unknown</option><option>Yes</option><option>No</option></select></div>
             <div><span className="lbl">CDL related</span><select value={f.cdl} onChange={(e)=>set('cdl',e.target.value)} className="inp"><option>Unknown</option><option>Yes</option><option>No</option></select></div>
+{showMoney && (<>
             <div><span className="lbl">Fine ($)</span><input type="number" step="0.01" value={f.fine} onChange={(e)=>set('fine',e.target.value)} className="inp" /></div>
             <div className="sm:col-span-3"><span className="lbl">Customer fee ($) — what you charge</span><input type="number" step="0.01" value={f.fee} onChange={(e)=>set('fee',e.target.value)} className="inp" placeholder="e.g. 500" /></div>
+            </>)}
           </div>
         </div>
         <div className="card p-5">

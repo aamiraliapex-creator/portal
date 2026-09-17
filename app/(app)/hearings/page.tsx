@@ -1,12 +1,15 @@
 import Link from 'next/link'
 import { getSql } from '@/lib/db'
+import { getViewerScope } from '@/lib/ownership'
+import { hasPermission } from '@/lib/authz'
+import NotAvailable from '../NotAvailable'
 import { stateToTz, formatInTz, formatTimeInTz, OFFICE_TZ } from '@/lib/timezones'
 import SchedulePicker from './SchedulePicker'
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
 type Row = {
-  id: string; citation: string | null; official_no: string | null; court: string | null; state: string | null;
+  id: string; citation: string | null; official_no: string | null; court: string | null; court_phone: string | null; state: string | null;
   status: string; hearing_at: string | null; hearing_tz: string | null; hearing_type: string; prep_status: string;
   next_action: string | null; next_action_at: string | null;
   customer_id: string; first_name: string; last_name: string
@@ -27,18 +30,25 @@ const prepBadge = (p: string) => {
 }
 
 export default async function Hearings() {
+  const scope = await getViewerScope()
+  if (!scope) return <NotAvailable />
+  const canEdit = hasPermission(scope.user.role, 'case.update')
+  const scoped = scope.scoped
+  const viewerId = scope.viewerId
   const sql = getSql()
   const rows = await sql<Row[]>`
-    select k.id, k.citation, k.official_no, k.court, k.state, k.status, k.hearing_at, k.hearing_tz, k.hearing_type, k.prep_status,
+    select k.id, k.citation, k.official_no, k.court, k.court_phone, k.state, k.status, k.hearing_at, k.hearing_tz, k.hearing_type, k.prep_status,
            k.next_action, k.next_action_at, k.customer_id, c.first_name, c.last_name
     from cases k join customers c on c.id=k.customer_id
-    where k.hearing_at is not null or k.status in ('Hearing Scheduled','Waiting for Court')
+    where (${scoped} = false or k.agent_id = ${viewerId})
+      and coalesce(k.approval_status,'ACTIVE') = 'ACTIVE'
+      and (k.hearing_at is not null or k.status in ('Hearing Scheduled','Waiting for Court'))
     order by coalesce(k.hearing_at, k.next_action_at) asc nulls last limit 200`
 
   const unscheduled = await sql<{ id: string; citation: string | null; official_no: string | null; first_name: string; last_name: string }[]>`
     select k.id, k.citation, k.official_no, c.first_name, c.last_name
     from cases k join customers c on c.id = k.customer_id
-    where k.hearing_at is null and k.status not in ('Resolved','Dismissed')
+    where (${scoped} = false or k.agent_id = ${viewerId}) and coalesce(k.approval_status,'ACTIVE') = 'ACTIVE' and k.hearing_at is null and k.status not in ('Resolved','Dismissed')
     order by k.created_at desc limit 100`
   const options = unscheduled.map((k) => ({ id: k.id, label: `${k.first_name} ${k.last_name} - ${k.citation || k.official_no || 'no citation'}` }))
 
@@ -51,7 +61,7 @@ export default async function Hearings() {
         </div>
       </div>
 
-      <div className="mt-4"><SchedulePicker options={options} /></div>
+      <div className="mt-4">{canEdit && <SchedulePicker options={options} />}</div>
 
       <div className="mt-3 card overflow-x-auto">
         <table className="min-w-full">
@@ -79,11 +89,13 @@ export default async function Hearings() {
                   </td>
                   <td className="text-slate-700"><Link className="hover:underline" href={`/customers/${k.customer_id}`}>{k.first_name} {k.last_name}</Link></td>
                   <td className="text-slate-600">{k.citation || k.official_no || '—'}</td>
-                  <td className="text-slate-600">{k.court || '—'}</td>
+                  <td className="text-slate-600">{k.court || '—'}
+                  {k.court_phone && <div className="text-xs"><a href={`tel:${k.court_phone.replace(/[^+\d]/g, '')}`} className="text-brand-600 hover:underline">☎ {k.court_phone}</a></div>}
+                </td>
                   <td><span className={'badge ' + typeBadge(k.hearing_type)}>{k.hearing_type}</span></td>
                   <td><span className={'badge ' + prepBadge(k.prep_status)}>{k.prep_status}</span></td>
                   <td><span className={'badge ' + statusBadge(k.status)}><span className={'dot ' + statusDot(k.status)} />{k.status}</span></td>
-                  <td><Link href={`/hearings/${k.id}`} className="text-xs font-semibold text-brand-600 hover:underline">Edit</Link></td>
+                  <td>{canEdit && <Link href={`/hearings/${k.id}`} className="text-xs font-semibold text-brand-600 hover:underline">Edit</Link>}</td>
                 </tr>
               )
             })}

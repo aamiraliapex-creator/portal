@@ -1,9 +1,13 @@
+import { requirePageAccess } from '@/lib/ownership'
+import NotAvailable from '../../NotAvailable'
 import { getSql } from '@/lib/db'
 import { ASSIGNABLE_AGENT_ROLES } from '@/lib/authz'
 import CustomerForm from './CustomerForm'
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 export default async function NewCustomerPage() {
+  const scope = await requirePageAccess('customer.create')
+  if (!scope) return <NotAvailable />
   const sql = getSql()
   const agents = await sql<{ id: string; name: string }[]>`
     select id, name from users

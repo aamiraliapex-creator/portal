@@ -1,11 +1,9 @@
 import { NextResponse } from 'next/server'
 import { getSql } from '@/lib/db'
 import { guarded } from '@/lib/auth-server'
+import { getViewerScope, loadOwnedCase } from '@/lib/ownership'
 import { stateToTz } from '@/lib/timezones'
-import {
-  CASE_STATUSES, HEARING_TYPES, PREP_STATUSES, LIMITS,
-  pickEnum, parseText, parseDate, firstError,
-} from '@/lib/validation'
+import { CASE_STATUSES, HEARING_TYPES, PREP_STATUSES, LIMITS, pickEnum, parseText, parseDate, firstError } from '@/lib/validation'
 export const runtime = 'nodejs'
 
 export const POST = guarded('case.update', async (req) => {
@@ -22,11 +20,17 @@ export const POST = guarded('case.update', async (req) => {
   const bad = firstError(hearingType, prepStatus, status, state, hearingAt)
   if (bad) return NextResponse.json({ error: bad }, { status: 400 })
 
-  const sql = getSql()
-  const [existing] = await sql<{ state: string | null }[]>`select state from cases where id = ${caseId} limit 1`
-  if (!existing) return NextResponse.json({ error: 'Case not found.' }, { status: 404 })
+  const scope = await getViewerScope()
+  if (!scope) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
-  const hearingTz = hearingAt.value ? stateToTz(state.value ?? existing.state) : null
+  // Object-level check: a scoped agent may only touch their own case, and the
+  // case must be approved. A missing case and someone else's case are
+  // indistinguishable to the caller (404, no existence oracle).
+  const kase = await loadOwnedCase(scope, caseId, { requireActive: true })
+  if (!kase) return NextResponse.json({ error: 'Not available' }, { status: 404 })
+
+  const sql = getSql()
+  const hearingTz = hearingAt.value ? stateToTz(state.value ?? kase.state) : null
   await sql`
     update cases set
       hearing_at = ${hearingAt.value ?? null},

@@ -1,8 +1,12 @@
+import { requirePageAccess } from '@/lib/ownership'
+import NotAvailable from '../NotAvailable'
 import { getSql } from '@/lib/db'
 import SettingsForm from './SettingsForm'
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 export default async function Settings() {
+  const scope = await requirePageAccess('settings.update')
+  if (!scope) return <NotAvailable />
   const sql = getSql()
   const rows = await sql<{ key: string; value: string }[]>`select key, value from settings`
   const initial: Record<string,string> = {}; rows.forEach((r)=>{ initial[r.key]=r.value })

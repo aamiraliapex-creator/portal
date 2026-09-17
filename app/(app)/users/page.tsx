@@ -1,3 +1,5 @@
+import { requirePageAccess } from '@/lib/ownership'
+import NotAvailable from '../NotAvailable'
 import Link from 'next/link'
 import { getSql } from '@/lib/db'
 import { getCurrentUser } from '@/lib/auth-server'
@@ -8,6 +10,8 @@ export const dynamic = 'force-dynamic'
 type U = { id: string; name: string; email: string; role: string; status: string; last_login_at: string | null }
 
 export default async function Users() {
+  const scope = await requirePageAccess('user.manage')
+  if (!scope) return <NotAvailable />
   const s = await getCurrentUser()
   const sql = getSql()
   const rows = await sql<U[]>`select id, name, email, role, status, last_login_at from users order by created_at desc`

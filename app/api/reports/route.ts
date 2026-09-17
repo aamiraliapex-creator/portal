@@ -1,15 +1,25 @@
 import { getSql } from '@/lib/db'
 import { toCsv } from '@/lib/csv'
 import { requirePermission, authzResponse } from '@/lib/auth-server'
+import { canViewReportType, isReportType } from '@/lib/authz'
 import { stateToTz, formatInTz } from '@/lib/timezones'
 export const runtime = 'nodejs'
 
 
 export async function GET(req: Request) {
-  try { await requirePermission('report.export') } catch (e) { return authzResponse(e) ?? new Response('Forbidden', { status: 403 }) }
+  let actor
+  try { actor = await requirePermission('report.export') } catch (e) { return authzResponse(e) ?? new Response('Forbidden', { status: 403 }) }
   const sql = getSql()
   const { searchParams } = new URL(req.url)
   const r = searchParams.get('r') || 'status'
+  // Unknown report names are a bad request, not an operational report.
+  // Note: this runs AFTER the export-permission check on purpose, so an
+  // unauthorised caller cannot probe which report types exist.
+  if (!isReportType(r)) return new Response('Unknown report type', { status: 400 })
+  // Exports follow the same per-report-type policy as the screen.
+  if (!canViewReportType(actor.role, r)) {
+    return new Response('Forbidden', { status: 403 })
+  }
   let head: string[] = []; let body: (string | number)[][] = []
   if (r === 'status') { head = ['Status', 'Cases']; const d = await sql<{ status: string; n: number }[]>`select status, count(*)::int n from cases group by status order by n desc`; body = d.map((x) => [x.status, x.n]) }
   else if (r === 'agent') { head = ['Agent', 'Cases']; const d = await sql<{ name: string; n: number }[]>`select coalesce(u.name,'Unassigned') name, count(k.*)::int n from cases k left join users u on u.id=k.agent_id group by 1 order by n desc`; body = d.map((x) => [x.name, x.n]) }

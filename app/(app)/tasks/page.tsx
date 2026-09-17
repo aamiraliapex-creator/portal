@@ -1,3 +1,6 @@
+import { getViewerScope } from '@/lib/ownership'
+import { hasPermission } from '@/lib/authz'
+import NotAvailable from '../NotAvailable'
 import Link from 'next/link'
 import { getSql } from '@/lib/db'
 import TaskActions from './TaskActions'
@@ -7,10 +10,14 @@ export const dynamic = 'force-dynamic'
 type T = { id: string; title: string; case_ref: string | null; assignee: string | null; due_at: string | null; priority: string; status: string }
 
 export default async function Tasks({ searchParams: searchParamsInput }: { searchParams: Promise<{ filter?: string }> }) {
+  const scope = await getViewerScope()
+  if (!scope) return <NotAvailable />
+  const scoped = scope.scoped
+  const viewerId = scope.viewerId
   const searchParams = await searchParamsInput
   const sql = getSql()
   const filter = searchParams.filter || 'all'
-  const rows = await sql<T[]>`select id, title, case_ref, assignee, due_at, priority, status from tasks order by created_at desc limit 200`
+  const rows = await sql<T[]>`select id, title, case_ref, assignee, due_at, priority, status from tasks where (${scoped} = false or assignee_id = ${viewerId}) order by created_at desc limit 200`
   const now = Date.now()
   const isOverdue = (t: T) => (t.status === 'Open' || t.status === 'In Progress') && t.due_at != null && new Date(t.due_at).getTime() < now
   const shown = rows.filter((t) => filter === 'all' ? true : filter === 'open' ? (t.status === 'Open' || t.status === 'In Progress') : filter === 'overdue' ? isOverdue(t) : filter === 'completed' ? t.status === 'Completed' : true)
@@ -19,7 +26,7 @@ export default async function Tasks({ searchParams: searchParamsInput }: { searc
     <div>
       <div className="flex items-center justify-between">
         <div><h1 className="text-xl font-semibold text-slate-900">Tasks</h1><p className="text-sm text-slate-500">Overdue items stay flagged until completed or cancelled.</p></div>
-        <Link href="/tasks/new" className="rounded-lg bg-brand-600 px-4 py-2 text-sm font-semibold text-white hover:bg-brand-700">+ New task</Link>
+        {hasPermission(scope.user.role, 'task.create') && <Link href="/tasks/new" className="rounded-lg bg-brand-600 px-4 py-2 text-sm font-semibold text-white hover:bg-brand-700">+ New task</Link>}
       </div>
       <div className="mt-4 flex flex-wrap gap-1.5">
         {['all','open','overdue','completed'].map((f) => <Link key={f} href={`/tasks?filter=${f}`} className={chip(filter===f)}>{f[0].toUpperCase()+f.slice(1)}</Link>)}

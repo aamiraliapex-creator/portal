@@ -1,5 +1,7 @@
 import Link from 'next/link'
 import { getSql } from '@/lib/db'
+import { getCurrentUser } from '@/lib/auth-server'
+import { isScopedToOwnWork, canSeeMoney, hasPermission } from '@/lib/authz'
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
@@ -18,6 +20,12 @@ const subBadge = (s: string) => s === 'Active' ? 'bg-emerald-50 text-emerald-700
 
 export default async function Customers({ searchParams: searchParamsInput }: { searchParams: Promise<{ q?: string; from?: string; to?: string; status?: string; page?: string }> }) {
   const searchParams = await searchParamsInput
+  const me = await getCurrentUser()
+  const scoped = !!me && isScopedToOwnWork(me.role)
+  const showMoney = !!me && canSeeMoney(me.role)
+  const canCreateCustomer = !!me && hasPermission(me.role, 'customer.create')
+  const canCreateCase = !!me && hasPermission(me.role, 'case.create')
+  const viewerId = me?.id ?? ''
   const sql = getSql()
   const q = (searchParams.q || '').trim()
   const from = searchParams.from || null
@@ -34,11 +42,12 @@ export default async function Customers({ searchParams: searchParamsInput }: { s
       count(*) filter (where cdl='Yes')::int cdl,
       count(*) filter (where exists (select 1 from payments p where p.customer_id=customers.id and p.status in ('Pending','Overdue')))::int overdue
     from customers
-    where (${from}::date is null or coalesce(joined_at,created_at) >= ${from}::date)
+    where (${scoped} = false or agent_id = ${viewerId}) and (${from}::date is null or coalesce(joined_at,created_at) >= ${from}::date)
       and (${to}::date is null or coalesce(joined_at,created_at) < (${to}::date + 1))`
 
   const where = sql`
-    where (${q} = '' or (c.first_name||' '||c.last_name||' '||coalesce(c.email,'')||' '||coalesce(c.legacy_member_id,'')) ilike ${'%' + q + '%'})
+    where (${scoped} = false or c.agent_id = ${viewerId})
+      and (${q} = '' or (c.first_name||' '||c.last_name||' '||coalesce(c.email,'')||' '||coalesce(c.legacy_member_id,'')) ilike ${'%' + q + '%'})
       and (${from}::date is null or coalesce(c.joined_at,c.created_at) >= ${from}::date)
       and (${to}::date is null or coalesce(c.joined_at,c.created_at) < (${to}::date + 1))
       and (${status} = 'all'
@@ -64,7 +73,7 @@ export default async function Customers({ searchParams: searchParamsInput }: { s
   const kpis: [string, number | string, string][] = [
     ['Total Customers', k.total, 'text-slate-900'], ['Active', k.active, 'text-emerald-600'],
     ['Cancelled', k.cancelled, 'text-rose-600'], ['Past due', k.pastdue, 'text-amber-600'],
-    ['CDL Drivers', k.cdl, 'text-brand-600'], ['With overdue $', k.overdue, 'text-rose-600'],
+    ['CDL Drivers', k.cdl, 'text-brand-600'], ...(showMoney ? [['With overdue $', k.overdue, 'text-rose-600'] as [string, number|string, string]] : []),
   ]
   const qs = (over: Record<string, string>) => {
     const p = new URLSearchParams(); if (q) p.set('q', q); if (from) p.set('from', from); if (to) p.set('to', to); if (status !== 'all') p.set('status', status)
@@ -77,7 +86,7 @@ export default async function Customers({ searchParams: searchParamsInput }: { s
     <div>
       <div className="flex items-center justify-between">
         <div><h1 className="text-xl font-bold text-slate-900">Customers</h1><p className="text-sm text-slate-500">Master profiles with documents, payments &amp; next payment — filter by join date.</p></div>
-        <Link href="/customers/new" className="btn btn-red">+ Add customer</Link>
+        {canCreateCustomer && <Link href="/customers/new" className="btn btn-red">+ Add customer</Link>}
       </div>
 
       <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-6">
@@ -115,15 +124,15 @@ export default async function Customers({ searchParams: searchParamsInput }: { s
               </div>
               <div className="text-xs"><p className="mb-1 font-semibold uppercase tracking-wide text-slate-400">Contact</p><p className="text-slate-600">{c.email || '—'}</p><p className="text-slate-600">{c.phone || '—'}</p></div>
               <div className="text-xs"><p className="mb-1 font-semibold uppercase tracking-wide text-slate-400">Documents</p><p className="text-slate-600">License: {c.license_no || '—'}</p><p className="text-slate-600">DOT: {c.dot} · {c.state || '—'}</p></div>
-              <div className="text-xs"><p className="mb-1 font-semibold uppercase tracking-wide text-slate-400">Status</p><p className="text-slate-600">Pay: {c.pay_channel || '—'}</p><p><span className={'badge ' + subBadge(c.sub_status)}><span className="dot" />{c.sub_status}</span></p><p className={'mt-0.5 ' + (Number(c.overdue_amt) > 0 ? 'text-brand-600 font-medium' : 'text-slate-600')}>Next: {c.next_payment || '—'}</p></div>
+              <div className="text-xs"><p className="mb-1 font-semibold uppercase tracking-wide text-slate-400">Status</p><p className="text-slate-600">Pay: {showMoney ? (c.pay_channel || '—') : '—'}</p><p><span className={'badge ' + subBadge(c.sub_status)}><span className="dot" />{c.sub_status}</span></p><p className={'mt-0.5 ' + (Number(c.overdue_amt) > 0 ? 'text-brand-600 font-medium' : 'text-slate-600')}>Next: {showMoney ? (c.next_payment || '—') : '—'}</p></div>
               <div className="text-xs">
                 <p className="mb-1 font-semibold uppercase tracking-wide text-slate-400">Insights</p>
-                <p className="text-slate-600">Invoices: {c.inv_paid} paid</p>
+                {showMoney && <p className="text-slate-600">Invoices: {c.inv_paid} paid</p>}
                 <p className="text-slate-600">Cases: {c.cases}</p>
-                {Number(c.overdue_amt) > 0 && <p className="text-brand-600">Overdue: {money(Number(c.overdue_amt))}</p>}
+                {showMoney && Number(c.overdue_amt) > 0 && <p className="text-brand-600">Overdue: {money(Number(c.overdue_amt))}</p>}
                 <div className="mt-2 flex flex-col gap-1">
                   <Link href={`/customers/${c.id}`} className="chip text-center">View profile</Link>
-                  <Link href="/cases/new" className="chip text-center">+ Add case</Link>
+                  {canCreateCase && <Link href="/cases/new" className="chip text-center">+ Add case</Link>}
                 </div>
               </div>
             </div>

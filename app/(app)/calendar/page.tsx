@@ -1,3 +1,5 @@
+import { getViewerScope } from '@/lib/ownership'
+import NotAvailable from '../NotAvailable'
 import Link from 'next/link'
 import { getSql } from '@/lib/db'
 import { stateToTz, tzAbbr } from '@/lib/timezones'
@@ -15,6 +17,10 @@ const KIND_STYLE: Record<Ev['kind'], { dot: string; pill: string; icon: string; 
 }
 
 export default async function Calendar({ searchParams: searchParamsInput }: { searchParams: Promise<{ y?: string; m?: string }> }) {
+  const scope = await getViewerScope()
+  if (!scope) return <NotAvailable />
+  const scoped = scope.scoped
+  const viewerId = scope.viewerId
   const searchParams = await searchParamsInput
   const sql = getSql()
   const now = new Date()
@@ -26,10 +32,14 @@ export default async function Calendar({ searchParams: searchParamsInput }: { se
 
   const cases = await sql<{ id: string; citation: string | null; official_no: string | null; court: string | null; state: string | null; status: string; hearing_at: string | null; hearing_tz: string | null; next_action: string | null; next_action_at: string | null }[]>`
     select id, citation, official_no, court, state, status, hearing_at, hearing_tz, next_action, next_action_at from cases
-    where (hearing_at >= ${iso(monthStart)}::date and hearing_at < ${iso(monthEnd)}::date)
-       or (hearing_at is null and next_action_at >= ${iso(monthStart)}::date and next_action_at < ${iso(monthEnd)}::date)`
+    where (${scoped} = false or agent_id = ${viewerId})
+      and coalesce(approval_status,'ACTIVE') = 'ACTIVE'
+      and (
+            (hearing_at >= ${iso(monthStart)}::date and hearing_at < ${iso(monthEnd)}::date)
+         or (hearing_at is null and next_action_at >= ${iso(monthStart)}::date and next_action_at < ${iso(monthEnd)}::date)
+          )`
   const tasks = await sql<{ title: string; due_at: string }[]>`
-    select title, due_at from tasks where due_at >= ${iso(monthStart)}::date and due_at < ${iso(monthEnd)}::date and status in ('Open','In Progress')`
+    select title, due_at from tasks where (${scoped} = false or assignee_id = ${viewerId}) and due_at >= ${iso(monthStart)}::date and due_at < ${iso(monthEnd)}::date and status in ('Open','In Progress')`
 
   const events: Ev[] = []
   cases.forEach((c) => {
@@ -77,7 +87,10 @@ export default async function Calendar({ searchParams: searchParamsInput }: { se
   const agendaCases = await sql<{ id: string; citation: string | null; official_no: string | null; court: string | null; state: string | null; status: string; hearing_at: string | null; hearing_tz: string | null; next_action: string | null; next_action_at: string | null; first_name: string; last_name: string }[]>`
     select k.id, k.citation, k.official_no, k.court, k.state, k.status, k.hearing_at, k.hearing_tz, k.next_action, k.next_action_at, c.first_name, c.last_name
     from cases k join customers c on c.id = k.customer_id
-    where coalesce(k.hearing_at, k.next_action_at) >= now() and coalesce(k.hearing_at, k.next_action_at) < ${iso(agendaEnd)}::date
+    where (${scoped} = false or k.agent_id = ${viewerId})
+      and coalesce(k.approval_status,'ACTIVE') = 'ACTIVE'
+      and coalesce(k.hearing_at, k.next_action_at) >= now()
+      and coalesce(k.hearing_at, k.next_action_at) < ${iso(agendaEnd)}::date
     order by coalesce(k.hearing_at, k.next_action_at) asc limit 8`
 
   return (

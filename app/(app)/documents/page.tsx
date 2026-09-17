@@ -1,9 +1,20 @@
+import { getViewerScope } from '@/lib/ownership'
+import NotAvailable from '../NotAvailable'
 import { getSql } from '@/lib/db'
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 export default async function Documents() {
+  const scope = await getViewerScope()
+  if (!scope) return <NotAvailable />
+  const scoped = scope.scoped
+  const viewerId = scope.viewerId
   const sql = getSql()
-  const rows = await sql<{ id: string; category: string; file_name: string; created_at: string }[]>`select id, category, file_name, created_at from documents order by created_at desc limit 100`
+  const rows = await sql<{ id: string; category: string; file_name: string; created_at: string }[]>`
+    select d.id, d.category, d.file_name, d.created_at from documents d
+     where ${scoped} = false
+        or exists (select 1 from customers c where c.id = d.customer_id and c.agent_id = ${viewerId})
+        or exists (select 1 from cases k where k.id = d.case_id and k.agent_id = ${viewerId})
+     order by d.created_at desc limit 100`
   return (
     <div>
       <h1 className="text-xl font-semibold text-slate-900">Documents</h1>

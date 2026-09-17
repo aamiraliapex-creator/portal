@@ -32,18 +32,28 @@ export async function POST(req: Request) {
     const rounded = Math.round(amount * 100) / 100
 
     const sql = getSql()
-    const [customer] = await sql<{ id: string }[]>`select id from customers where id = ${customerId} limit 1`
+    const [customer] = await sql<{ id: string; approval_status: string }[]>`
+      select id, coalesce(approval_status,'ACTIVE') as approval_status from customers where id = ${customerId} limit 1`
     if (!customer) return NextResponse.json({ error: 'Customer not found.' }, { status: 404 })
+    // Money must never be recorded against a customer that has not been approved.
+    if (customer.approval_status !== 'ACTIVE') {
+      return NextResponse.json({ error: 'That customer is awaiting approval. Payments can only be recorded once it is approved.' }, { status: 400 })
+    }
 
     // A case payment must name a case, and that case must belong to this customer.
     if (kind === 'Case' && !caseId) {
       return NextResponse.json({ error: 'Select the case this payment applies to.' }, { status: 400 })
     }
     if (caseId) {
-      const [kase] = await sql<{ id: string; customer_id: string }[]>`select id, customer_id from cases where id = ${caseId} limit 1`
+      const [kase] = await sql<{ id: string; customer_id: string; approval_status: string }[]>`
+        select id, customer_id, coalesce(approval_status,'ACTIVE') as approval_status from cases where id = ${caseId} limit 1`
       if (!kase) return NextResponse.json({ error: 'Case not found.' }, { status: 404 })
       if (kase.customer_id !== customerId) {
         return NextResponse.json({ error: 'That case does not belong to the selected customer.' }, { status: 400 })
+      }
+      // Money must never be recorded against a case that has not been approved.
+      if (kase.approval_status !== 'ACTIVE') {
+        return NextResponse.json({ error: 'That case is awaiting approval. Payments can only be recorded once it is approved.' }, { status: 400 })
       }
     }
     // Membership payments are never linked to a case.

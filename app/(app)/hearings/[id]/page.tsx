@@ -1,20 +1,29 @@
 import Link from 'next/link'
 import { getSql } from '@/lib/db'
+import { getViewerScope, loadOwnedCase } from '@/lib/ownership'
+import { hasPermission } from '@/lib/authz'
+import NotAvailable from '../../NotAvailable'
 import HearingForm from './HearingForm'
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
 type CaseRow = {
-  id: string; citation: string | null; official_no: string | null; court: string | null; state: string | null;
+  id: string; citation: string | null; official_no: string | null; court: string | null; court_phone: string | null; state: string | null;
   status: string; hearing_at: string | null; hearing_tz: string | null; hearing_type: string; prep_status: string;
   customer_id: string; first_name: string; last_name: string
 }
 
 export default async function EditHearing({ params: paramsInput }: { params: Promise<{ id: string }> }) {
   const params = await paramsInput
+  const scope = await getViewerScope()
+  if (!scope) return <NotAvailable />
+  // Editing a hearing is a case update: refuse before loading or rendering.
+  if (!hasPermission(scope.user.role, 'case.update')) return <NotAvailable />
+  const owned = await loadOwnedCase(scope, params.id)
+  if (!owned) return <NotAvailable note="This hearing is not assigned to you." />
   const sql = getSql()
   const [k] = await sql<CaseRow[]>`
-    select k.id, k.citation, k.official_no, k.court, k.state, k.status, k.hearing_at, k.hearing_tz, k.hearing_type, k.prep_status,
+    select k.id, k.citation, k.official_no, k.court, k.court_phone, k.state, k.status, k.hearing_at, k.hearing_tz, k.hearing_type, k.prep_status,
            k.customer_id, c.first_name, c.last_name
     from cases k join customers c on c.id = k.customer_id
     where k.id = ${params.id} limit 1`

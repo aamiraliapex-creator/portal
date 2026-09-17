@@ -1,30 +1,47 @@
 import { NextResponse } from 'next/server'
 import { getSql } from '@/lib/db'
-import { getCurrentUser } from '@/lib/auth-server'
+import { getViewerScope } from '@/lib/ownership'
 export const runtime = 'nodejs'
-const money = (n: number) => '$' + Number(n || 0).toLocaleString()
 
+/**
+ * Financial alerts. Callers without financial access get an empty, amount-free
+ * payload rather than balances and customer names; callers with access but a
+ * scoped role only see their own customers' figures.
+ */
 export async function GET() {
-  // Revoked sessions (disabled, deleted, password-changed) and anonymous callers
-  // must be refused outright: returning 200 with an empty list would mask
-  // revocation and leak the fact that the endpoint is reachable.
-  const s = await getCurrentUser()
-  if (!s) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-  try {
-    const sql = getSql()
-    const owing = await sql<{ citation: string | null; official_no: string | null; customer_id: string; first_name: string; last_name: string; fee: string; paid: string; days: number }[]>`
-      select k.citation, k.official_no, k.customer_id, c.first_name, c.last_name, k.fee,
-        coalesce((select sum(p.amount) from payments p where p.case_id=k.id and p.status='Paid'),0) as paid,
-        greatest(0, extract(day from now() - coalesce(k.fee_since, k.created_at))::int) as days
-      from cases k join customers c on c.id=k.customer_id
-      where k.fee is not null and k.fee > coalesce((select sum(p.amount) from payments p where p.case_id=k.id and p.status='Paid'),0)
-      order by days desc`
-    const unpaid = await sql<{ invoice: string | null; amount: string; customer_id: string; first_name: string; last_name: string }[]>`
-      select p.invoice, p.amount, p.customer_id, c.first_name, c.last_name from payments p join customers c on c.id=p.customer_id where p.status in ('Pending','Overdue') order by p.paid_at desc`
-    const items = [
-      ...owing.map((r) => ({ tone: r.days > 20 ? 'rose' : 'amber', title: r.days > 20 ? 'Payment overdue (>20 days)' : 'Case balance due', body: `${money(Number(r.fee) - Number(r.paid))} unpaid · ${r.first_name} ${r.last_name} · ${r.citation || r.official_no} · ${r.days} days`, href: `/customers/${r.customer_id}` })),
-      ...unpaid.map((r) => ({ tone: 'amber', title: 'Unpaid invoice', body: `${money(Number(r.amount))} · ${r.first_name} ${r.last_name} · ${r.invoice || ''}`, href: `/customers/${r.customer_id}` })),
-    ]
-    return NextResponse.json({ items })
-  } catch { return NextResponse.json({ items: [] }) }
+  const scope = await getViewerScope()
+  if (!scope) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  if (!scope.showMoney) return NextResponse.json({ items: [], count: 0 })
+
+  // Financial records follow the financial-scope policy, not operational scope.
+  const scoped = !scope.allMoney
+  const { viewerId } = scope
+  const sql = getSql()
+
+  const overdue = await sql<{ id: string; label: string; sub: string; days: number }[]>`
+    select k.id,
+           ('$' || (k.fee - coalesce((select sum(p.amount) from payments p where p.case_id = k.id and p.status = 'Paid'), 0))
+             || ' unpaid · ' || coalesce(k.citation, k.official_no, 'case')) as label,
+           (c.first_name || ' ' || c.last_name) as sub,
+           greatest(0, extract(day from now() - coalesce(k.fee_since, k.created_at))::int) as days
+      from cases k join customers c on c.id = k.customer_id
+     where k.fee is not null
+       and k.fee > coalesce((select sum(p.amount) from payments p where p.case_id = k.id and p.status = 'Paid'), 0)
+       and coalesce(k.approval_status,'ACTIVE') = 'ACTIVE'
+       and (${scoped} = false or k.agent_id = ${viewerId})
+     order by days desc limit 10`
+
+  const unpaid = await sql<{ id: string; invoice: string | null; amount: string; first_name: string; last_name: string }[]>`
+    select p.id, p.invoice, p.amount, c.first_name, c.last_name
+      from payments p join customers c on c.id = p.customer_id
+     where p.status in ('Pending','Overdue')
+       and coalesce(c.approval_status,'ACTIVE') = 'ACTIVE'
+       and (${scoped} = false or c.agent_id = ${viewerId})
+     order by p.paid_at desc limit 10`
+
+  const items = [
+    ...overdue.map((o) => ({ kind: 'fee', title: o.label, sub: `${o.sub} · ${o.days} days` })),
+    ...unpaid.map((u) => ({ kind: 'invoice', title: `${u.invoice || 'Invoice'} · $${Number(u.amount).toLocaleString()}`, sub: `${u.first_name} ${u.last_name}` })),
+  ]
+  return NextResponse.json({ items, count: items.length })
 }

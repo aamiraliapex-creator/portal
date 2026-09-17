@@ -41,6 +41,17 @@ create table if not exists documents (
 // Add every non-core column defensively so databases created by older versions get upgraded.
 const ALTER = `
 alter table users add column if not exists session_version integer not null default 0;
+alter table tasks add column if not exists assignee_id text;
+alter table customers add column if not exists approval_status text not null default 'ACTIVE';
+alter table customers add column if not exists created_by text;
+alter table customers add column if not exists approved_by text;
+alter table customers add column if not exists approved_at timestamptz;
+alter table customers add column if not exists rejection_reason text;
+alter table cases add column if not exists approval_status text not null default 'ACTIVE';
+alter table cases add column if not exists created_by text;
+alter table cases add column if not exists approved_by text;
+alter table cases add column if not exists approved_at timestamptz;
+alter table cases add column if not exists rejection_reason text;
 alter table customers add column if not exists legacy_member_id text;
 alter table customers add column if not exists dob date;
 alter table customers add column if not exists email text;
@@ -70,6 +81,7 @@ alter table cases add column if not exists fee_since timestamptz;
 alter table cases add column if not exists next_action text;
 alter table cases add column if not exists next_action_at timestamptz;
 alter table cases add column if not exists agent_id text;
+alter table cases add column if not exists court_phone text;
 alter table cases add column if not exists hearing_at timestamptz;
 alter table cases add column if not exists hearing_tz text;
 alter table cases add column if not exists hearing_type text default 'In person';
@@ -91,10 +103,43 @@ alter table tasks add column if not exists status text default 'Open';
 
 alter table documents add column if not exists customer_id text;
 alter table documents add column if not exists case_id text;
+
+-- Backfill the stable id from the historical free-text assignee name, but ONLY
+-- when that name matches exactly one account. User names are not unique, so a
+-- naive join could hand a confidential task to the wrong person. Ambiguous and
+-- unmatched rows keep assignee_id NULL and stay visible only to full-visibility
+-- management until an administrator assigns them deliberately.
+update tasks t
+   set assignee_id = (select u.id from users u where u.name = t.assignee)
+ where t.assignee_id is null
+   and t.assignee is not null
+   and (select count(*) from users u where u.name = t.assignee) = 1;
+
+-- Intentional deletion policy: removing a user un-assigns their tasks rather
+-- than deleting the work or leaving a dangling id.
+do $$
+begin
+  if not exists (
+    select 1 from information_schema.table_constraints
+     where constraint_name = 'tasks_assignee_id_fkey' and table_name = 'tasks'
+  ) then
+    -- Clear any id that no longer resolves, so the constraint can be added.
+    update tasks set assignee_id = null
+     where assignee_id is not null
+       and not exists (select 1 from users u where u.id = tasks.assignee_id);
+    alter table tasks
+      add constraint tasks_assignee_id_fkey
+      foreign key (assignee_id) references users (id) on delete set null;
+  end if;
+end $$;
 `
 
 // Speeds up every list/dashboard/report page, which all filter or sort by these columns.
 const INDEXES = `
+create index if not exists tasks_assignee_id_idx on tasks (assignee_id);
+create index if not exists customers_approval_idx on customers (approval_status);
+create index if not exists cases_approval_idx on cases (approval_status);
+
 create index if not exists login_attempts_updated_at_idx on login_attempts (updated_at);
 create index if not exists idx_cases_customer_id on cases(customer_id);
 create index if not exists idx_cases_status on cases(status);
