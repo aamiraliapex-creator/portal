@@ -6,6 +6,7 @@ import {
 import { createSession } from '@/lib/session'
 import { normalizeEmail, isValidEmail, EMAIL_MAX_LENGTH } from '@/lib/validation'
 import { reserveAttempt, clearAttempts, pruneStaleAttempts } from '@/lib/login-limiter'
+import { createUserSession, pruneSessions } from '@/lib/sessions'
 export const runtime = 'nodejs'
 
 type U = { id: string; name: string; email: string; password_hash: string; role: string; status: string; session_version: number }
@@ -67,7 +68,14 @@ export async function POST(req: Request) {
 
     try { await clearAttempts(sql, email) } catch {}
     try { await sql`update users set last_login_at = now() where id = ${user!.id}` } catch {}
-    await createSession({ id: user!.id, name: user!.name, email: user!.email, role: user!.role, sv: Number(user!.session_version ?? 0) })
+    // A distinct database session per sign-in, so each device can be listed
+    // and revoked individually. Only an opaque random key is stored.
+    const { sessionKey } = await createUserSession(user!.id, {
+      userAgent: req.headers.get('user-agent'),
+      ip: req.headers.get('x-forwarded-for') || req.headers.get('x-real-ip'),
+    })
+    try { await pruneSessions() } catch {}
+    await createSession({ id: user!.id, name: user!.name, email: user!.email, role: user!.role, sv: Number(user!.session_version ?? 0), sid: sessionKey })
     return NextResponse.json({ ok: true })
   } catch (e: unknown) {
     console.error('login error:', e instanceof Error ? e.message : e)

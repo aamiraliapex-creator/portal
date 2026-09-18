@@ -2,7 +2,8 @@ import { NextResponse } from 'next/server'
 import { getSql } from '@/lib/db'
 import { requireUser, authzResponse } from '@/lib/auth-server'
 import { hashPassword, verifyPassword, isWithinBcryptLimit, BCRYPT_MAX_BYTES } from '@/lib/password'
-import { createSession } from '@/lib/session'
+import { createSession, getSessionClaims } from '@/lib/session'
+import { revokeAllSessions, createUserSession } from '@/lib/sessions'
 export const runtime = 'nodejs'
 
 const MIN_PASSWORD = 12
@@ -32,7 +33,14 @@ export async function POST(req: Request) {
              session_version = coalesce(session_version, 0) + 1
        where id = ${me.id}
        returning session_version`
-    await createSession({ id: me.id, name: me.name, email: me.email, role: me.role, sv: Number(updated.session_version) })
+    // Every existing device session is revoked, then one fresh session is
+    // issued for the browser that performed the change.
+    await revokeAllSessions(me.id)
+    const { sessionKey } = await createUserSession(me.id, {
+      userAgent: req.headers.get('user-agent'),
+      ip: req.headers.get('x-forwarded-for') || req.headers.get('x-real-ip'),
+    })
+    await createSession({ id: me.id, name: me.name, email: me.email, role: me.role, sv: Number(updated.session_version), sid: sessionKey })
     return NextResponse.json({ ok: true })
   } catch (e) { return authzResponse(e) ?? NextResponse.json({ error: 'Request failed.' }, { status: 500 }) }
 }

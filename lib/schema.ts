@@ -36,6 +36,21 @@ create table if not exists documents (
   category text not null default 'File', file_name text not null default '', url text not null default '',
   created_at timestamptz not null default now()
 );
+
+-- Individual sign-in sessions. Stores only a random opaque identifier: never a
+-- JWT, cookie value, password or any other reusable authentication secret.
+create table if not exists user_sessions (
+  id text primary key default gen_random_uuid()::text,
+  user_id text not null references users (id) on delete cascade,
+  session_key text not null unique,
+  created_at timestamptz not null default now(),
+  last_seen_at timestamptz not null default now(),
+  expires_at timestamptz not null,
+  revoked_at timestamptz,
+  user_agent text,
+  device text,
+  ip_prefix text
+);
 `
 
 // Add every non-core column defensively so databases created by older versions get upgraded.
@@ -136,6 +151,9 @@ end $$;
 
 // Speeds up every list/dashboard/report page, which all filter or sort by these columns.
 const INDEXES = `
+create index if not exists user_sessions_user_idx on user_sessions (user_id);
+create index if not exists user_sessions_expires_idx on user_sessions (expires_at);
+create index if not exists user_sessions_active_idx on user_sessions (user_id, revoked_at);
 create index if not exists tasks_assignee_id_idx on tasks (assignee_id);
 create index if not exists customers_approval_idx on customers (approval_status);
 create index if not exists cases_approval_idx on cases (approval_status);

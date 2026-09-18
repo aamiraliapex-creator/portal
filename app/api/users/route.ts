@@ -3,6 +3,7 @@ import { getSql } from '@/lib/db'
 import { requirePermission, authzResponse } from '@/lib/auth-server'
 import { hashPassword, isWithinBcryptLimit, BCRYPT_MAX_BYTES } from '@/lib/password'
 import { canManageRole, isRole, isUserStatus, ROLE_RANK, type Role } from '@/lib/authz'
+import { revokeAllSessions } from '@/lib/sessions'
 export const runtime = 'nodejs'
 
 const MIN_PASSWORD = 12
@@ -77,6 +78,9 @@ export async function PATCH(req: Request) {
     // Disabling also revokes existing sessions for that account.
     if (status === 'DISABLED') {
       await sql`update users set status = ${status}, session_version = coalesce(session_version,0) + 1 where id = ${id}`
+      // Also revoke the individual session rows, so re-enabling the account
+      // cannot resurrect pre-disable sessions or list them as active.
+      await revokeAllSessions(id)
     } else {
       await sql`update users set status = ${status} where id = ${id}`
     }

@@ -20,7 +20,7 @@ export default function ProfileForm({ name, email, role }: { name: string; email
         {msg && <p className="rounded bg-emerald-50 px-3 py-2 text-sm text-emerald-700">{msg}</p>}
         {err && <p className="rounded bg-rose-50 px-3 py-2 text-sm text-rose-700">{err}</p>}
         <input type="password" placeholder="Current password" value={f.current} onChange={(e)=>set('current',e.target.value)} className="w-full rounded-lg border-slate-300 text-sm" />
-        <input type="password" placeholder="New password (min 8)" value={f.next} onChange={(e)=>set('next',e.target.value)} className="w-full rounded-lg border-slate-300 text-sm" />
+        <input type="password" placeholder="New password (min 12)" value={f.next} onChange={(e)=>set('next',e.target.value)} className="w-full rounded-lg border-slate-300 text-sm" />
         <input type="password" placeholder="Confirm new password" value={f.confirm} onChange={(e)=>set('confirm',e.target.value)} className="w-full rounded-lg border-slate-300 text-sm" />
         <button className="rounded-lg bg-brand-600 px-4 py-2 text-sm font-semibold text-white hover:bg-brand-700">Update password</button>
       </form>

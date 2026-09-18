@@ -1,5 +1,6 @@
 import { getSql } from './db'
 import { getSessionClaims } from './session'
+import { validateSession, touchSession, needsTouch } from './sessions'
 import { hasPermission, isRole, type Permission, type Role } from './authz'
 
 export type CurrentUser = { id: string; name: string; email: string; role: Role; status: string }
@@ -25,6 +26,19 @@ export async function getCurrentUser(): Promise<CurrentUser | null> {
     if (u.status !== 'ACTIVE') return null                // disabled
     if (Number(u.session_version) !== Number(claims.sv)) return null // password changed / revoked
     if (!isRole(u.role)) return null
+
+    // The individual session must still exist, belong to this user, and be
+    // neither revoked nor expired. Account-wide session_version remains the
+    // emergency revocation mechanism above.
+    const session = await validateSession(claims.sid, u.id)
+    if (!session) return null
+    // Decide from the row we already have, so no UPDATE is issued on a normal
+    // request. When the window has passed we AWAIT the write: fire-and-forget
+    // work is not guaranteed to finish on serverless. The UPDATE repeats the
+    // threshold in its WHERE clause, so concurrent requests cannot double-write.
+    if (needsTouch(session)) {
+      try { await touchSession(claims.sid) } catch { /* last_seen_at is best effort */ }
+    }
     // Role comes from the DB, never from the token.
     return { id: u.id, name: u.name, email: u.email, role: u.role, status: u.status }
   } catch {

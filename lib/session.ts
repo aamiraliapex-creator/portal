@@ -6,7 +6,7 @@ const COOKIE = 'clp_session'
 export const SESSION_COOKIE = COOKIE
 
 /** Claims embedded in the JWT. `sv` is the session version used for revocation. */
-export type SessionClaims = { id: string; name: string; email: string; role: string; sv: number }
+export type SessionClaims = { id: string; name: string; email: string; role: string; sv: number; sid: string }
 
 export async function createSession(user: SessionClaims) {
   const token = await new SignJWT({ ...user })
@@ -36,6 +36,7 @@ export async function readToken(token?: string): Promise<SessionClaims | null> {
       email: String(payload.email ?? ''),
       role: String(payload.role ?? ''),
       sv: Number(payload.sv ?? 0),
+      sid: String(payload.sid ?? ''),
     }
   } catch {
     return null

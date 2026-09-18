@@ -1752,3 +1752,290 @@ test('W2: a non-financial viewer gets a working case list with no financial valu
   const adminHtml = await (await fetch(`${BASE}/customers/${cust.id}`, { headers: { cookie: (await owner()) } })).text()
   assert.ok(adminHtml.includes('987,654') || adminHtml.includes('987654'), 'an admin must still see the fee')
 })
+
+// ===========================================================================
+// Sessions and device management
+// ===========================================================================
+async function sessionIdsFor(email) {
+  const [u] = await sql`select id from users where email = ${email.toLowerCase()}`
+  return sql`select id, session_key, revoked_at from user_sessions where user_id = ${u.id} order by created_at`
+}
+
+test('S1: two logins create two distinct sessions, visible only to their owner', async () => {
+  const email = `s1-${Date.now()}@example.test`
+  await ensureUser(email, 'CASE_AGENT')
+  const a = await login(email, PW)
+  const b = await login(email, PW)
+  assert.equal(a.status, 200); assert.equal(b.status, 200)
+  assert.notEqual(a.cookie, b.cookie, 'each sign-in must issue a distinct token')
+
+  // ensureUser() signs in once itself, so two further logins add two more.
+  const rows = await sessionIdsFor(email)
+  assert.equal(rows.length, 3, 'each sign-in must create its own database session')
+  assert.equal(new Set(rows.map((r) => r.session_key)).size, 3, 'session keys must be unique')
+
+  // Another user cannot see them.
+  const otherEmail = `s1-other-${Date.now()}@example.test`
+  const other = await ensureUser(otherEmail, 'CASE_AGENT')
+  const otherHtml = await (await fetch(`${BASE}/profile`, { headers: { cookie: other } })).text()
+  for (const r of rows) assert.ok(!otherHtml.includes(r.id), 'another user must not see these sessions')
+
+  const ownHtml = await (await fetch(`${BASE}/profile`, { headers: { cookie: a.cookie } })).text()
+  assert.ok(ownHtml.includes('Sessions'), 'the owner sees their sessions panel')
+})
+
+test('S2: revoking one session blocks it immediately while the other keeps working', async () => {
+  const email = `s2-${Date.now()}@example.test`
+  await ensureUser(email, 'CASE_AGENT')
+  const a = await login(email, PW)
+  const b = await login(email, PW)
+
+  const rows = await sessionIdsFor(email)
+  // Identify session B's row by its key, then revoke it from session A.
+  const [bRow] = await sql`select us.id from user_sessions us
+                            join users u on u.id = us.user_id
+                           where u.email = ${email.toLowerCase()} order by us.created_at desc limit 1`
+  const res = await api('/api/sessions', a.cookie, 'POST', { action: 'revoke', sessionId: bRow.id })
+  assert.equal(res.status, 200, await res.text())
+
+  const blocked = await api('/api/notifications', b.cookie, 'GET')
+  assert.ok([401, 403].includes(blocked.status), 'the revoked session must stop working immediately')
+  const still = await api('/api/notifications', a.cookie, 'GET')
+  assert.equal(still.status, 200, 'the other session must keep working')
+  assert.ok(rows.length >= 2)
+})
+
+test('S3: a user cannot revoke another user\u2019s session', async () => {
+  const victimEmail = `s3-victim-${Date.now()}@example.test`
+  await ensureUser(victimEmail, 'CASE_AGENT')
+  const victim = await login(victimEmail, PW)
+  const [vRow] = await sql`select us.id, us.revoked_at from user_sessions us join users u on u.id = us.user_id
+                            where u.email = ${victimEmail.toLowerCase()} order by us.created_at desc limit 1`
+
+  const attackerEmail = `s3-attacker-${Date.now()}@example.test`
+  const attacker = await ensureUser(attackerEmail, 'CASE_AGENT')
+  const res = await api('/api/sessions', attacker, 'POST', { action: 'revoke', sessionId: vRow.id })
+  assert.equal(res.status, 404, 'must be a neutral 404, never a successful cross-user revoke')
+
+  const [after] = await sql`select revoked_at from user_sessions where id = ${vRow.id}`
+  assert.equal(after.revoked_at, null, 'the victim session must be untouched')
+  const ok = await api('/api/notifications', victim.cookie, 'GET')
+  assert.equal(ok.status, 200, 'the victim stays signed in')
+})
+
+test('S4: sign out other devices keeps only the current session', async () => {
+  const email = `s4-${Date.now()}@example.test`
+  await ensureUser(email, 'CASE_AGENT')
+  const a = await login(email, PW)
+  const b = await login(email, PW)
+  const c = await login(email, PW)
+
+  const res = await api('/api/sessions', a.cookie, 'POST', { action: 'revoke-others' })
+  assert.equal(res.status, 200)
+  // ensureUser's own sign-in plus logins b and c are all revoked; a survives.
+  assert.equal((await res.json()).revoked, 3)
+
+  assert.equal((await api('/api/notifications', a.cookie, 'GET')).status, 200, 'current session survives')
+  for (const other of [b.cookie, c.cookie]) {
+    const r = await api('/api/notifications', other, 'GET')
+    assert.ok([401, 403].includes(r.status), 'other sessions must be revoked')
+  }
+})
+
+test('S5: sign out everywhere invalidates every session including the current one', async () => {
+  const email = `s5-${Date.now()}@example.test`
+  await ensureUser(email, 'CASE_AGENT')
+  const a = await login(email, PW)
+  const b = await login(email, PW)
+
+  const res = await api('/api/sessions', a.cookie, 'POST', { action: 'revoke-all' })
+  assert.equal(res.status, 200)
+  assert.equal((await res.json()).signedOut, true)
+
+  for (const cookie of [a.cookie, b.cookie]) {
+    const r = await api('/api/notifications', cookie, 'GET')
+    assert.ok([401, 403].includes(r.status), 'no session may survive')
+  }
+})
+
+test('S6: logout revokes the database session, not just the cookie', async () => {
+  const email = `s6-${Date.now()}@example.test`
+  await ensureUser(email, 'CASE_AGENT')
+  const a = await login(email, PW)
+  const captured = a.cookie
+
+  const out = await fetch(`${BASE}/api/auth/logout`, { method: 'POST', headers: { cookie: captured } })
+  assert.ok(out.ok || out.status === 200)
+
+  // Replaying the captured cookie must fail: the row is revoked server-side.
+  const replay = await api('/api/notifications', captured, 'GET')
+  assert.ok([401, 403].includes(replay.status), 'a copied cookie must not work after sign-out')
+})
+
+test('S7: password change revokes all sessions and issues exactly one fresh session', async () => {
+  const email = `s7-${Date.now()}@example.test`
+  await ensureUser(email, 'CASE_AGENT')
+  const a = await login(email, PW)
+  const b = await login(email, PW)
+
+  const res = await api('/api/profile', b.cookie, 'POST', { current: PW, next: 'Rotated-Passw0rd!2026' })
+  assert.equal(res.status, 200, await res.text())
+
+  const stale = await api('/api/notifications', a.cookie, 'GET')
+  assert.ok([401, 403].includes(stale.status), 'other sessions must be revoked')
+
+  const [u] = await sql`select id from users where email = ${email.toLowerCase()}`
+  const [{ n }] = await sql`select count(*)::int n from user_sessions
+                             where user_id = ${u.id} and revoked_at is null and expires_at > now()`
+  assert.equal(n, 1, 'exactly one active session must remain')
+})
+
+test('S8: disabled and deleted accounts still have their sessions rejected', async () => {
+  const email = `s8-${Date.now()}@example.test`
+  await ensureUser(email, 'CASE_AGENT')
+  const a = await login(email, PW)
+  const [u] = await sql`select id from users where email = ${email.toLowerCase()}`
+
+  await api('/api/users', (await owner()), 'PATCH', { id: u.id, status: 'DISABLED' })
+  assert.ok([401, 403].includes((await api('/api/notifications', a.cookie, 'GET')).status))
+
+  // Deleting the user must cascade the session rows away.
+  await sql`delete from users where id = ${u.id}`
+  const [{ n }] = await sql`select count(*)::int n from user_sessions where user_id = ${u.id}`
+  assert.equal(n, 0, 'ON DELETE CASCADE must remove the sessions')
+})
+
+test('S9: expired and revoked sessions are rejected', async () => {
+  const email = `s9-${Date.now()}@example.test`
+  await ensureUser(email, 'CASE_AGENT')
+  const a = await login(email, PW)
+  const [u] = await sql`select id from users where email = ${email.toLowerCase()}`
+
+  await sql`update user_sessions set expires_at = now() - interval '1 minute' where user_id = ${u.id}`
+  const expired = await api('/api/notifications', a.cookie, 'GET')
+  assert.ok([401, 403].includes(expired.status), 'an expired session must be rejected')
+
+  await sql`update user_sessions set expires_at = now() + interval '1 hour', revoked_at = now() where user_id = ${u.id}`
+  const revoked = await api('/api/notifications', a.cookie, 'GET')
+  assert.ok([401, 403].includes(revoked.status), 'a revoked session must be rejected')
+})
+
+test('S10: no reusable authentication secret is stored in the session table', async () => {
+  const email = `s10-${Date.now()}@example.test`
+  await ensureUser(email, 'CASE_AGENT')
+  const a = await login(email, PW)
+  const token = a.cookie.split('=')[1]
+
+  const [u] = await sql`select id from users where email = ${email.toLowerCase()}`
+  const rows = await sql`select * from user_sessions where user_id = ${u.id} order by created_at desc`
+  assert.ok(rows.length >= 1)
+  const serialized = JSON.stringify(rows)
+  assert.ok(!serialized.includes(token), 'the JWT must never be stored')
+  assert.ok(!serialized.includes(PW), 'no password may be stored')
+  // The stored key is opaque and is not the cookie value.
+  for (const r of rows) {
+    assert.notEqual(r.session_key, token, 'the stored key must not be the cookie value')
+    assert.ok(r.session_key.length >= 32, 'the session key must be long and random')
+  }
+})
+
+test('S11: disabling an account revokes its session rows, so re-enabling shows none active', async () => {
+  const email = `s11-${Date.now()}@example.test`
+  await ensureUser(email, 'CASE_AGENT')
+  const a = await login(email, PW)
+  const b = await login(email, PW)
+  const [u] = await sql`select id from users where email = ${email.toLowerCase()}`
+
+  const [{ n: activeBefore }] = await sql`select count(*)::int n from user_sessions
+                                           where user_id = ${u.id} and revoked_at is null`
+  assert.ok(activeBefore >= 2, 'sessions exist while the account is active')
+
+  const dis = await api('/api/users', (await owner()), 'PATCH', { id: u.id, status: 'DISABLED' })
+  assert.equal(dis.status, 200, await dis.text())
+
+  const [{ n: activeAfter }] = await sql`select count(*)::int n from user_sessions
+                                          where user_id = ${u.id} and revoked_at is null`
+  assert.equal(activeAfter, 0, 'disabling must revoke every session row')
+
+  // Re-enable: the obsolete pre-disable sessions must NOT come back as active.
+  const en = await api('/api/users', (await owner()), 'PATCH', { id: u.id, status: 'ACTIVE' })
+  assert.equal(en.status, 200)
+  const [{ n: afterEnable }] = await sql`select count(*)::int n from user_sessions
+                                          where user_id = ${u.id} and revoked_at is null and expires_at > now()`
+  assert.equal(afterEnable, 0, 're-enabling must not resurrect old sessions')
+
+  for (const cookie of [a.cookie, b.cookie]) {
+    const r = await api('/api/notifications', cookie, 'GET')
+    assert.ok([401, 403].includes(r.status), 'pre-disable tokens must stay rejected after re-enable')
+  }
+
+  // A fresh sign-in works and is the only session listed.
+  const fresh = await login(email, PW)
+  assert.equal(fresh.status, 200)
+  const profile = await (await fetch(`${BASE}/profile`, { headers: { cookie: fresh.cookie } })).text()
+  assert.ok(profile.includes('Sessions'), 'the profile lists sessions')
+  const [{ n: finalActive }] = await sql`select count(*)::int n from user_sessions
+                                          where user_id = ${u.id} and revoked_at is null and expires_at > now()`
+  assert.equal(finalActive, 1, 'only the new session is active')
+})
+
+test('S12: revoke-all expires the clp_session cookie in its response', async () => {
+  const email = `s12-${Date.now()}@example.test`
+  await ensureUser(email, 'CASE_AGENT')
+  const a = await login(email, PW)
+
+  const res = await fetch(`${BASE}/api/sessions`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', cookie: a.cookie },
+    body: JSON.stringify({ action: 'revoke-all' }),
+  })
+  assert.equal(res.status, 200)
+  const setCookies = (res.headers.getSetCookie?.() || []).join(' ; ')
+  assert.match(setCookies, /clp_session=/, 'the response must set the session cookie')
+  assert.ok(/Max-Age=0|Expires=Thu, 01 Jan 1970/i.test(setCookies), 'the cookie must be expired, not left in place')
+
+  const after = await api('/api/notifications', a.cookie, 'GET')
+  assert.ok([401, 403].includes(after.status), 'the revoked session must be rejected')
+})
+
+test('S13: normal logout expires the clp_session cookie in its response', async () => {
+  const email = `s13-${Date.now()}@example.test`
+  await ensureUser(email, 'CASE_AGENT')
+  const a = await login(email, PW)
+
+  const res = await fetch(`${BASE}/api/auth/logout`, { method: 'POST', headers: { cookie: a.cookie } })
+  assert.equal(res.status, 200)
+  const setCookies = (res.headers.getSetCookie?.() || []).join(' ; ')
+  assert.match(setCookies, /clp_session=/, 'logout must set the session cookie')
+  assert.ok(/Max-Age=0|Expires=Thu, 01 Jan 1970/i.test(setCookies), 'logout must expire the cookie')
+})
+
+test('S14: last_seen_at is not rewritten on every request but refreshes past the window', async () => {
+  const email = `s14-${Date.now()}@example.test`
+  await ensureUser(email, 'CASE_AGENT')
+  const a = await login(email, PW)
+  const [u] = await sql`select id from users where email = ${email.toLowerCase()}`
+  // ensureUser() signs in too, so keep only the newest session (cookie `a`)
+  // and assert against exactly that row.
+  await sql`delete from user_sessions
+             where user_id = ${u.id}
+               and id <> (select id from user_sessions where user_id = ${u.id} order by created_at desc limit 1)`
+  const [{ n: only }] = await sql`select count(*)::int n from user_sessions where user_id = ${u.id}`
+  assert.equal(only, 1, 'precondition: exactly one session under test')
+
+  const [start] = await sql`select last_seen_at from user_sessions where user_id = ${u.id} and revoked_at is null`
+  // Several requests inside the throttle window must not move last_seen_at.
+  for (let i = 0; i < 3; i++) await api('/api/notifications', a.cookie, 'GET')
+  const [unchanged] = await sql`select last_seen_at from user_sessions where user_id = ${u.id} and revoked_at is null`
+  assert.equal(new Date(unchanged.last_seen_at).getTime(), new Date(start.last_seen_at).getTime(),
+    'no UPDATE may be issued inside the throttle window')
+
+  // Push it past the window; the next request must refresh it.
+  await sql`update user_sessions set last_seen_at = now() - interval '10 minutes'
+             where user_id = ${u.id} and revoked_at is null`
+  const [stale] = await sql`select last_seen_at from user_sessions where user_id = ${u.id} and revoked_at is null`
+  await api('/api/notifications', a.cookie, 'GET')
+  const [touched] = await sql`select last_seen_at from user_sessions where user_id = ${u.id} and revoked_at is null`
+  assert.ok(new Date(touched.last_seen_at).getTime() > new Date(stale.last_seen_at).getTime(),
+    'last_seen_at must refresh once the window has passed')
+})
