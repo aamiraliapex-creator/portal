@@ -51,12 +51,46 @@ create table if not exists user_sessions (
   device text,
   ip_prefix text
 );
+
+-- Persistent reminders/notifications. One row per recipient per event per
+-- schedule; the unique constraint is the final duplicate defence so that
+-- overlapping scheduler runs cannot double-create.
+create table if not exists notifications (
+  id                  text primary key default gen_random_uuid()::text,
+  recipient_user_id   text not null references users (id) on delete cascade,
+  type                text not null,
+  priority            text not null default 'normal',
+  source_type         text not null,
+  source_id           text,
+  event_key           text not null,
+  title               text not null,
+  message             text not null,
+  action_url          text,
+  event_at            timestamptz,
+  scheduled_for       timestamptz not null,
+  created_at          timestamptz not null default now(),
+  read_at             timestamptz,
+  dismissed_at        timestamptz,
+  acknowledged_at     timestamptz,
+  acknowledged_by     text references users (id) on delete set null,
+  cancelled_at        timestamptz,
+  escalated_at        timestamptz,
+  delivery_status     text not null default 'pending',
+  delivered_at        timestamptz,
+  delivery_attempts   integer not null default 0,
+  last_delivery_error text,
+  constraint notifications_unique_event
+    unique (recipient_user_id, source_type, source_id, event_key)
+);
 `
 
 // Add every non-core column defensively so databases created by older versions get upgraded.
 const ALTER = `
 alter table users add column if not exists session_version integer not null default 0;
 alter table tasks add column if not exists assignee_id text;
+alter table documents add column if not exists expires_on date;
+alter table notifications add column if not exists delivered_at timestamptz;
+alter table customers add column if not exists next_payment_date date;
 alter table customers add column if not exists approval_status text not null default 'ACTIVE';
 alter table customers add column if not exists created_by text;
 alter table customers add column if not exists approved_by text;
@@ -76,6 +110,27 @@ alter table customers add column if not exists plan text;
 alter table customers add column if not exists sub_status text default 'Active';
 alter table customers add column if not exists pay_channel text;
 alter table customers add column if not exists next_payment text;
+-- Backfill ONLY values that are provably real ISO calendar dates.
+-- A per-row exception guard is required: '2026-02-31' matches the regex but
+-- raises on cast, which would abort the whole migration. Invalid values keep
+-- their original text in customers.next_payment for a human to correct, and no
+-- invalid date is ever silently rewritten to a different one.
+do $$
+declare r record;
+begin
+  for r in
+    select id, next_payment from customers
+     where next_payment_date is null
+       and next_payment ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'
+  loop
+    begin
+      update customers set next_payment_date = r.next_payment::date where id = r.id;
+    exception when others then
+      -- impossible calendar date: leave next_payment_date null, keep the text
+      continue;
+    end;
+  end loop;
+end $$;
 alter table customers add column if not exists cdl text default 'No';
 alter table customers add column if not exists license_no text;
 alter table customers add column if not exists dot text default 'No';
@@ -151,6 +206,12 @@ end $$;
 
 // Speeds up every list/dashboard/report page, which all filter or sort by these columns.
 const INDEXES = `
+create index if not exists notifications_recipient_idx on notifications (recipient_user_id, scheduled_for);
+create index if not exists notifications_pending_idx on notifications (delivery_status, scheduled_for);
+create index if not exists notifications_source_idx on notifications (source_type, source_id);
+create index if not exists notifications_unread_idx on notifications (recipient_user_id, read_at, cancelled_at);
+create index if not exists documents_expires_idx on documents (expires_on);
+create index if not exists customers_next_payment_date_idx on customers (next_payment_date);
 create index if not exists user_sessions_user_idx on user_sessions (user_id);
 create index if not exists user_sessions_expires_idx on user_sessions (expires_at);
 create index if not exists user_sessions_active_idx on user_sessions (user_id, revoked_at);

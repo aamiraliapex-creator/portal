@@ -1,7 +1,9 @@
 'use client'
 import { useRouter } from 'next/navigation'
 import { useState } from 'react'
-import { stateToTz, utcToLocalInputValue, localInputToUtcIso } from '@/lib/timezones'
+import { stateToTzStrict, utcToLocalInputValue, localInputToUtcIso } from '@/lib/timezones'
+import CourtTimezoneSelect from '../../CourtTimezoneSelect'
+import { TZ_REVIEW_WARNING, resolveHearingTzDetailed, initialSelectorTz, applyTimezoneChange } from '@/lib/hearing-time'
 
 type CaseRow = {
   id: string; citation: string | null; official_no: string | null; court: string | null; state: string | null;
@@ -11,23 +13,56 @@ type CaseRow = {
 
 export default function HearingForm({ caseRow }: { caseRow: CaseRow }) {
   const router = useRouter()
-  const tz = caseRow.hearing_tz || stateToTz(caseRow.state)
+  // Strict resolution: an unresolvable zone shows UTC plus a warning rather
+  // than a plausible Pacific time.
+  const resolution = resolveHearingTzDetailed(caseRow.hearing_tz, caseRow.state)
+  const initialTz = resolution.tz
   const [f, setF] = useState({
-    hearingAt: caseRow.hearing_at ? utcToLocalInputValue(caseRow.hearing_at, tz) : '',
+    // An INVALID legacy zone is never loaded into the controlled selector: it
+    // starts blank, the review warning shows, and a valid choice is required
+    // before saving. A valid stored zone is preserved exactly.
+    hearingTz: initialSelectorTz(caseRow.hearing_tz),
+    hearingAt: caseRow.hearing_at ? utcToLocalInputValue(caseRow.hearing_at, initialTz) : '',
     hearingType: caseRow.hearing_type || 'In person',
     prepStatus: caseRow.prep_status || 'Not started',
     status: caseRow.status || 'Hearing Scheduled',
   })
   const [error, setError] = useState('')
   const [saving, setSaving] = useState(false)
+  // Tracks whether the user has typed into the date/time field, so a later
+  // timezone change never overwrites their edit with the database value.
+  const [manuallyEdited, setManuallyEdited] = useState(false)
   const set = (k: string, v: string) => setF((s) => ({ ...s, [k]: v }))
+  const setHearingAt = (v: string) => { setManuallyEdited(true); set('hearingAt', v) }
+
+  function changeTimezone(next: string) {
+    // Preserves a manual edit; otherwise re-renders the ORIGINAL stored instant
+    // in the newly selected zone (repeatable without drift).
+    setF((s) => ({
+      ...s,
+      ...applyTimezoneChange({ hearingAt: s.hearingAt, dateTimeEdited: manuallyEdited }, caseRow.hearing_at, next),
+    }))
+  }
 
   async function submit(e: React.FormEvent) {
     e.preventDefault(); setError(''); setSaving(true)
-    const hearingAt = f.hearingAt ? localInputToUtcIso(f.hearingAt, tz) : null
+    // Convert the local input using the SELECTED court timezone, never a
+    // Pacific fallback. An unchanged selector keeps the stored zone.
+    // With an unresolvable stored zone the selector is blank and a valid
+    // selection is mandatory before a court date can be saved.
+    const courtTz = f.hearingTz || (resolution.needsReview ? '' : stateToTzStrict(caseRow.state) || '')
+    if (f.hearingAt && !courtTz) {
+      setSaving(false)
+      setError('Select a court timezone for this hearing date.')
+      return
+    }
+    const hearingAt = f.hearingAt ? localInputToUtcIso(f.hearingAt, courtTz) : null
     const res = await fetch('/api/hearings', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ caseId: caseRow.id, hearingAt, hearingType: f.hearingType, prepStatus: f.prepStatus, status: f.status, state: caseRow.state }),
+      body: JSON.stringify({
+        caseId: caseRow.id, hearingAt, hearingTz: courtTz,
+        hearingType: f.hearingType, prepStatus: f.prepStatus, status: f.status, state: caseRow.state,
+      }),
     })
     setSaving(false)
     if (res.ok) { router.push('/hearings'); router.refresh() } else { const d = await res.json().catch(() => ({})); setError(d.error || 'Could not save.') }
@@ -45,9 +80,11 @@ export default function HearingForm({ caseRow }: { caseRow: CaseRow }) {
         <div className="card p-5">
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             <div>
-              <span className="lbl">Hearing date &amp; time (court-local, {tz.split('/').pop()?.replace('_', ' ')})</span>
-              <input type="datetime-local" value={f.hearingAt} onChange={(e) => set('hearingAt', e.target.value)} className="inp" />
+              <span className="lbl">Hearing date &amp; time (court-local, {(f.hearingTz || initialTz).split('/').pop()?.replace('_', ' ')})</span>
+              <input type="datetime-local" value={f.hearingAt} onChange={(e) => setHearingAt(e.target.value)} className="inp" />
             </div>
+        <CourtTimezoneSelect value={f.hearingTz} onChange={changeTimezone} suggested={stateToTzStrict(caseRow.state)} />
+        {resolution.needsReview && <p className="mt-1 text-[11px] font-semibold text-brand-700">{TZ_REVIEW_WARNING}</p>}
             <div>
               <span className="lbl">Type</span>
               <select value={f.hearingType} onChange={(e) => set('hearingType', e.target.value)} className="inp">
@@ -67,7 +104,7 @@ export default function HearingForm({ caseRow }: { caseRow: CaseRow }) {
               </select>
             </div>
           </div>
-          <p className="mt-3 text-xs text-slate-400">Court timezone is inferred from the case's state ({caseRow.state || 'not set'}). Update the case's state to change it.</p>
+          <p className="mt-3 text-xs text-slate-400">A recognised state only suggests a court timezone. Change it with the selector above at any time — editing the case state is not required.</p>
         </div>
         <div className="flex justify-end gap-2">
           <button type="button" onClick={() => router.push('/hearings')} className="btn btn-ghost">Cancel</button>

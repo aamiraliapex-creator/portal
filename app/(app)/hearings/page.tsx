@@ -1,6 +1,7 @@
 import Link from 'next/link'
 import { getSql } from '@/lib/db'
 import { getViewerScope } from '@/lib/ownership'
+import { resolveHearingTzDetailed, TZ_REVIEW_WARNING } from '@/lib/hearing-time'
 import { hasPermission } from '@/lib/authz'
 import NotAvailable from '../NotAvailable'
 import { stateToTz, formatInTz, formatTimeInTz, OFFICE_TZ } from '@/lib/timezones'
@@ -73,7 +74,10 @@ export default async function Hearings() {
           <tbody>
             {rows.length === 0 && <tr><td colSpan={8} className="py-10 text-center text-slate-500">No scheduled hearings.</td></tr>}
             {rows.map((k) => {
-              const tz = k.hearing_tz || stateToTz(k.state)
+              // Strict resolution: an unresolvable zone shows UTC plus a
+              // prominent warning rather than a plausible Pacific time.
+              const tzInfo = resolveHearingTzDetailed(k.hearing_tz, k.state)
+              const tz = tzInfo.tz
               const when = k.hearing_at
               return (
                 <tr key={k.id} className="rowlink">
@@ -82,6 +86,7 @@ export default async function Hearings() {
                       <>
                         <div className="font-semibold text-slate-800">{formatInTz(when, tz)}</div>
                         {tz !== OFFICE_TZ && <div className="text-xs text-slate-400">{formatTimeInTz(when, OFFICE_TZ)} office</div>}
+                        {tzInfo.needsReview && <div className="text-[11px] font-semibold text-brand-700">{TZ_REVIEW_WARNING}</div>}
                       </>
                     ) : (
                       <span className="text-slate-500">{k.next_action || '-'}{k.next_action_at ? ' - ' + new Date(k.next_action_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : ''}</span>

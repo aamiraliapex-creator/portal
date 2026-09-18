@@ -18,6 +18,8 @@ const EXPECTED: Record<Permission, Role[]> = {
   'payment.create':    ['SUPER_ADMIN', 'ADMIN', 'MANAGER', 'BILLING'],
   'task.create':       ['SUPER_ADMIN', 'ADMIN', 'MANAGER', 'CASE_AGENT', 'SALES_AGENT', 'BILLING', 'DOCUMENT_STAFF'],
   'task.update':       ['SUPER_ADMIN', 'ADMIN', 'MANAGER', 'CASE_AGENT', 'SALES_AGENT', 'BILLING', 'DOCUMENT_STAFF'],
+  'document.create':   ['SUPER_ADMIN', 'ADMIN', 'MANAGER', 'DOCUMENT_STAFF', 'CASE_AGENT'],
+  'document.update':   ['SUPER_ADMIN', 'ADMIN', 'MANAGER', 'DOCUMENT_STAFF', 'CASE_AGENT'],
   'assignment.update': ['SUPER_ADMIN', 'ADMIN', 'MANAGER'],
   'settings.update':   ['SUPER_ADMIN', 'ADMIN', 'MANAGER'],
   'user.manage':       ['SUPER_ADMIN', 'ADMIN'],

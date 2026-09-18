@@ -2,7 +2,8 @@ import { NextResponse } from 'next/server'
 import { getSql } from '@/lib/db'
 import { guarded } from '@/lib/auth-server'
 import { isAssignableAgentRole } from '@/lib/authz'
-import { stateToTz } from '@/lib/timezones'
+import { stateToTzStrict } from '@/lib/timezones'
+import { isValidTimeZone } from '@/lib/hearing-time'
 import {
   CASE_STATUSES, CASE_PRIORITIES, TRISTATE, HEARING_TYPES, PREP_STATUSES, LIMITS,
   pickEnum, parseText, parseMoney, parseDate, firstError,
@@ -84,7 +85,26 @@ export const POST = guarded('case.create', async (req, actor) => {
     agentId = agent.id
   }
 
-  const hearingTz = hearingAt.value ? stateToTz(state.value ?? null) : null
+  // Same rule as the hearing route: a hearing date requires an explicitly
+  // selected valid timezone or a recognised state. Never Pacific by default.
+  let hearingTz: string | null = null
+  if (hearingAt.value) {
+    const supplied = typeof b.hearingTz === 'string' ? b.hearingTz.trim() : ''
+    if (supplied) {
+      if (!isValidTimeZone(supplied)) {
+        return NextResponse.json({ error: 'Select a valid court timezone.' }, { status: 400 })
+      }
+      hearingTz = supplied
+    } else {
+      const fromState = stateToTzStrict(state.value ?? null)
+      if (!fromState) {
+        return NextResponse.json({
+          error: 'A recognised state or an explicitly selected court timezone is required for a hearing date.',
+        }, { status: 400 })
+      }
+      hearingTz = fromState
+    }
+  }
   const [row] = await sql<{ id: string }[]>`
     insert into cases (approval_status, created_by, customer_id, citation, official_no, court, court_phone, state, status, priority, cmv, cdl, fine, fee, fee_since, agent_id, hearing_at, hearing_tz, hearing_type, prep_status)
     values (${initialApprovalStatus(actor.role)}, ${actor.id}, ${customerId}, ${citation.value ?? null}, ${officialNo.value ?? null}, ${court.value ?? null}, ${courtPhone.value ?? null}, ${state.value ?? null},

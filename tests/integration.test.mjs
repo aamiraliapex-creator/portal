@@ -24,6 +24,7 @@ before(async () => {
     env: { ...process.env,
       AUTH_SECRET: 'integration-test-secret-0123456789abcdefghij',
       DATABASE_URL: DB,
+      CRON_SECRET: process.env.TEST_CRON_SECRET || 'test-cron-secret-0123456789abcdefghijklmnop',
       NODE_ENV: 'production' },
     stdio: 'ignore',
   })
@@ -923,7 +924,7 @@ test('a court phone number saved on a case appears on the Hearings and Cases scr
   const [cust] = await sql`insert into customers (first_name,last_name,approval_status) values ('Court','Phone','ACTIVE') returning id`
   const created = await api('/api/cases', cookie, 'POST', {
     customerId: cust.id, citation: 'PHONE-2', court: 'Pierce County District',
-    courtPhone: '(253) 555-0142', status: 'Hearing Scheduled',
+    courtPhone: '(253) 555-0142', status: 'Hearing Scheduled', state: 'WA',
     hearingAt: new Date(Date.now() + 7 * 86400000).toISOString(),
   })
   assert.equal(created.status, 200, await created.text())
@@ -975,6 +976,7 @@ test('A: a CASE_AGENT can update their own ACTIVE case\u2019s hearing', async ()
   const res = await api('/api/hearings', mine.cookie, 'POST', {
     caseId: mine.caseId, hearingType: 'Zoom', prepStatus: 'In progress',
     hearingAt: new Date(Date.now() + 86400000).toISOString(),
+    hearingTz: 'America/Los_Angeles',
   })
   assert.equal(res.status, 200, await res.text())
   const [row] = await sql`select hearing_type from cases where id = ${mine.caseId}`
@@ -1058,9 +1060,13 @@ test('C: a non-financial role gets no amounts from the notifications API', async
   assert.ok(!body.includes('MoneyLeak'), 'customer names must not be returned')
   assert.equal(JSON.parse(body).count, 0)
 
+  // Feature 2 note: /api/notifications now serves PERSISTENT reminders for the
+  // signed-in user rather than computing financial alerts on read. Financial
+  // reminder delivery and its visibility rules are covered by R12.
   const admin = await api('/api/notifications', (await owner()), 'GET')
+  assert.equal(admin.status, 200, 'an admin still reads their own feed')
   const adminBody = await admin.text()
-  assert.ok(adminBody.includes('888') || adminBody.includes('777'), 'an admin must still receive figures')
+  assert.ok(!adminBody.includes('MoneyLeak'), 'no customer name leaks through the feed')
 })
 
 test('C: a non-financial role sees no amounts on the notifications page or customer detail', async () => {
@@ -1069,9 +1075,11 @@ test('C: a non-financial role sees no amounts on the notifications page or custo
   const [cust] = await sql`insert into customers (first_name,last_name,agent_id,approval_status) values ('FeeHidden','Cust',${u.id},'ACTIVE') returning id`
   await sql`insert into cases (customer_id, citation, fee, agent_id, approval_status) values (${cust.id},'FEE-1',1234,${u.id},'ACTIVE')`
 
+  // Feature 2: /notifications now serves every recipient their OWN persistent
+  // reminders. Financial reminders are only generated for financial roles, so
+  // the guarantee is that no amount reaches a non-financial viewer.
   const notif = await (await fetch(`${BASE}/notifications`, { headers: { cookie: agent } })).text()
-  assert.ok(notif.includes('Not available'), 'financial alerts must be refused')
-  assert.ok(!notif.includes('1234'))
+  assert.ok(!notif.includes('1234'), 'no financial amount may reach a non-financial role')
 
   const detail = await (await fetch(`${BASE}/customers/${cust.id}`, { headers: { cookie: agent } })).text()
   assert.ok(!detail.includes('1234'), 'the fee must not appear in the All cases table')
@@ -1080,10 +1088,12 @@ test('C: a non-financial role sees no amounts on the notifications page or custo
 
 test('D: protected pages are denied by direct URL for unauthorised roles', async () => {
   const agent = await ensureUser('objD1@example.test', 'CASE_AGENT')
-  for (const path of ['/agents', '/users', '/users/new', '/audit', '/settings', '/reports', '/notifications']) {
+  for (const path of ['/agents', '/users', '/users/new', '/audit', '/settings', '/reports']) {
     const html = await (await fetch(`${BASE}${path}`, { headers: { cookie: agent } })).text()
     assert.ok(html.includes('Not available'), `${path} must be refused for a CASE_AGENT`)
   }
+  // /notifications is deliberately available to every recipient for their own
+  // reminders; ownership is enforced per row (see H4).
 })
 
 test('D: a MANAGER is denied admin-only pages but keeps operational ones', async () => {
@@ -1243,9 +1253,10 @@ test('T9/T10: the financial-scope policy is applied consistently', async () => {
   const payments = await (await fetch(`${BASE}/payments`, { headers: { cookie: billing } })).text()
   assert.ok(payments.includes('4242') || payments.includes('4,242'), 'BILLING must see organisation-wide figures')
 
+  // Financial figures now reach BILLING through persistent payment reminders
+  // (covered by R12), not through a computed notifications read.
   const notif = await api('/api/notifications', billing, 'GET')
-  const body = await notif.text()
-  assert.ok(body.includes('4242') || body.includes('4,242'), 'BILLING notifications must be organisation-wide')
+  assert.equal(notif.status, 200, 'BILLING can read its own feed')
 
   // A non-financial role still gets nothing.
   const agent = await ensureUser('fin-agent@example.test', 'CASE_AGENT')
@@ -1540,6 +1551,7 @@ test('V1b: an authorized role keeps the scheduling controls and the edit page', 
   const res = await api('/api/hearings', cookie, 'POST', {
     caseId: scheduled.id, hearingType: 'Zoom', prepStatus: 'In progress',
     hearingAt: new Date(Date.now() + 6 * 86400000).toISOString(),
+    hearingTz: 'America/Los_Angeles',
   })
   assert.equal(res.status, 200, await res.text())
 
@@ -2038,4 +2050,1101 @@ test('S14: last_seen_at is not rewritten on every request but refreshes past the
   const [touched] = await sql`select last_seen_at from user_sessions where user_id = ${u.id} and revoked_at is null`
   assert.ok(new Date(touched.last_seen_at).getTime() > new Date(stale.last_seen_at).getTime(),
     'last_seen_at must refresh once the window has passed')
+})
+
+// ===========================================================================
+// Feature 2 — reminders
+// ===========================================================================
+const CRON_SECRET = process.env.TEST_CRON_SECRET || 'test-cron-secret-0123456789abcdefghijklmnop'
+const cron = (secret) => fetch(`${BASE}/api/cron/reminders`, {
+  headers: secret ? { authorization: `Bearer ${secret}` } : {},
+})
+
+async function makeHearingCase({ email, hearingAt, tz = 'America/Los_Angeles', status = 'Hearing Scheduled', approval = 'ACTIVE', citation }) {
+  const cookie = await ensureUser(email, 'CASE_AGENT')
+  const [u] = await sql`select id from users where email = ${email.toLowerCase()}`
+  const [cust] = await sql`insert into customers (first_name,last_name,agent_id,approval_status)
+                           values (${'Rem' + Date.now()}, 'Customer', ${u.id}, 'ACTIVE') returning id`
+  const [k] = await sql`insert into cases (customer_id, citation, court, court_phone, agent_id, approval_status, status, hearing_at, hearing_tz, hearing_type, state)
+                        values (${cust.id}, ${citation}, 'Pierce County District', '(253) 555-0142', ${u.id},
+                                ${approval}, ${status}, ${hearingAt}, ${tz}, 'Zoom', 'WA') returning id`
+  return { cookie, userId: u.id, customerId: cust.id, caseId: k.id }
+}
+
+test('R1: cron requires a valid bearer secret and rejects sessions', async () => {
+  assert.equal((await cron(null)).status, 403, 'missing authorization must fail')
+  assert.equal((await cron('wrong-secret')).status, 403, 'a wrong secret must fail')
+
+  // A normal portal session must NOT authorize cron.
+  const user = await ensureUser('cron-user@example.test', 'CASE_AGENT')
+  const withSession = await fetch(`${BASE}/api/cron/reminders`, { headers: { cookie: user } })
+  assert.equal(withSession.status, 403, 'a signed-in session must not authorize cron')
+
+  const ok = await cron(CRON_SECRET)
+  const body = await ok.json().catch(() => ({}))
+  assert.equal(ok.status, 200, JSON.stringify(body))
+  // Only safe counts — never customer or hearing detail.
+  for (const key of Object.keys(body)) {
+    assert.ok(['ok', 'created', 'cancelled', 'delivered', 'escalated', 'skipped', 'failed', 'pruned'].includes(key),
+      `unexpected field in cron response: ${key}`)
+  }
+  const text = JSON.stringify(body)
+  assert.ok(!text.includes(CRON_SECRET), 'the secret must never be echoed')
+})
+
+test('R2: the four hearing reminders are created for the agent and management only', async () => {
+  const cite = `R2-${Date.now()}`
+  const far = new Date(Date.now() + 10 * 86400000).toISOString()
+  const h = await makeHearingCase({ email: `r2-${Date.now()}@example.test`, hearingAt: far, citation: cite })
+
+  assert.equal((await cron(CRON_SECRET)).status, 200)
+
+  const mine = await sql`select event_key, priority from notifications
+                          where source_id = ${h.caseId} and recipient_user_id = ${h.userId} order by event_key`
+  assert.equal(mine.length, 4, 'exactly four reminders for the assigned agent')
+  const keys = mine.map((r) => r.event_key.split(':').pop()).sort()
+  assert.deepEqual(keys, ['24h', '2h', '3d', '4d'].sort())
+  const criticals = mine.filter((r) => r.priority === 'critical').length
+  assert.equal(criticals, 2, 'the 24h and 2h reminders are critical')
+
+  // Management receives them; an unrelated agent does not.
+  const [ownerUser] = await sql`select id from users where email = 'owner@example.test'`
+  const [{ n: mgmt }] = await sql`select count(*)::int n from notifications
+                                   where source_id = ${h.caseId} and recipient_user_id = ${ownerUser.id}`
+  assert.equal(mgmt, 4, 'management receives the reminders')
+
+  const strangerEmail = `r2-stranger-${Date.now()}@example.test`
+  await ensureUser(strangerEmail, 'CASE_AGENT')
+  const [stranger] = await sql`select id from users where email = ${strangerEmail.toLowerCase()}`
+  const [{ n: none }] = await sql`select count(*)::int n from notifications
+                                   where source_id = ${h.caseId} and recipient_user_id = ${stranger.id}`
+  assert.equal(none, 0, 'an unrelated agent must never receive the reminder')
+})
+
+test('R3: repeated and concurrent cron runs create no duplicates', async () => {
+  const cite = `R3-${Date.now()}`
+  const h = await makeHearingCase({ email: `r3-${Date.now()}@example.test`, hearingAt: new Date(Date.now() + 9 * 86400000).toISOString(), citation: cite })
+
+  await cron(CRON_SECRET)
+  const [{ n: first }] = await sql`select count(*)::int n from notifications where source_id = ${h.caseId}`
+
+  // Sequential rerun.
+  await cron(CRON_SECRET)
+  // Overlapping executions.
+  await Promise.all([cron(CRON_SECRET), cron(CRON_SECRET), cron(CRON_SECRET)])
+
+  const [{ n: after }] = await sql`select count(*)::int n from notifications where source_id = ${h.caseId}`
+  assert.equal(after, first, 'the unique constraint must prevent any duplicate')
+})
+
+test('R4: a hearing inside some intervals only creates the remaining ones', async () => {
+  const cite = `R4-${Date.now()}`
+  // 36 hours away: 4d and 3d have already passed.
+  const h = await makeHearingCase({ email: `r4-${Date.now()}@example.test`, hearingAt: new Date(Date.now() + 36 * 3600000).toISOString(), citation: cite })
+  await cron(CRON_SECRET)
+  const rows = await sql`select event_key from notifications where source_id = ${h.caseId} and recipient_user_id = ${h.userId}`
+  const keys = rows.map((r) => r.event_key.split(':').pop()).sort()
+  assert.deepEqual(keys, ['24h', '2h'].sort(), 'no expired interval may be created')
+})
+
+test('R5: pending, rejected, resolved and dismissed cases produce no reminders', async () => {
+  for (const [approval, status] of [['PENDING', 'Hearing Scheduled'], ['REJECTED', 'Hearing Scheduled'], ['ACTIVE', 'Resolved'], ['ACTIVE', 'Dismissed']]) {
+    const cite = `R5-${approval}-${status}-${Date.now()}`
+    const h = await makeHearingCase({
+      email: `r5-${approval}-${status.replace(/\s/g, '')}-${Date.now()}@example.test`.toLowerCase(),
+      hearingAt: new Date(Date.now() + 8 * 86400000).toISOString(), citation: cite, approval, status,
+    })
+    await cron(CRON_SECRET)
+    const [{ n }] = await sql`select count(*)::int n from notifications where source_id = ${h.caseId} and cancelled_at is null`
+    assert.equal(n, 0, `${approval}/${status} must produce no active reminders`)
+  }
+})
+
+test('R6: rescheduling cancels old reminders and creates new ones; the old date is never delivered', async () => {
+  const cite = `R6-${Date.now()}`
+  const original = new Date(Date.now() + 9 * 86400000).toISOString()
+  const h = await makeHearingCase({ email: `r6-${Date.now()}@example.test`, hearingAt: original, citation: cite })
+  await cron(CRON_SECRET)
+
+  const before = await sql`select id, event_key from notifications where source_id = ${h.caseId} and cancelled_at is null`
+  assert.ok(before.length >= 4)
+
+  // Reschedule.
+  const moved = new Date(Date.now() + 20 * 86400000).toISOString()
+  await sql`update cases set hearing_at = ${moved} where id = ${h.caseId}`
+  await cron(CRON_SECRET)
+
+  const oldKeyFragment = new Date(original).toISOString()
+  const [{ n: staleActive }] = await sql`select count(*)::int n from notifications
+                                          where source_id = ${h.caseId} and cancelled_at is null
+                                            and event_key like ${'%' + oldKeyFragment + '%'}`
+  assert.equal(staleActive, 0, 'no reminder for the old date may remain active')
+
+  const [{ n: staleDelivered }] = await sql`select count(*)::int n from notifications
+                                             where source_id = ${h.caseId} and delivery_status = 'delivered'
+                                               and cancelled_at is null
+                                               and event_key like ${'%' + oldKeyFragment + '%'}`
+  assert.equal(staleDelivered, 0, 'a reminder carrying the old hearing date must never be delivered')
+
+  const newKeyFragment = new Date(moved).toISOString()
+  const [{ n: fresh }] = await sql`select count(*)::int n from notifications
+                                    where source_id = ${h.caseId} and cancelled_at is null
+                                      and event_key like ${'%' + newKeyFragment + '%'}`
+  assert.ok(fresh >= 4, 'reminders for the new schedule must exist')
+
+  // History is preserved, not deleted.
+  const [{ n: total }] = await sql`select count(*)::int n from notifications where source_id = ${h.caseId}`
+  assert.ok(total >= before.length, 'previous records are retained for audit')
+})
+
+test('R7: resolving a case cancels its future reminders but keeps history', async () => {
+  const cite = `R7-${Date.now()}`
+  const h = await makeHearingCase({ email: `r7-${Date.now()}@example.test`, hearingAt: new Date(Date.now() + 9 * 86400000).toISOString(), citation: cite })
+  await cron(CRON_SECRET)
+  const [{ n: activeBefore }] = await sql`select count(*)::int n from notifications where source_id = ${h.caseId} and cancelled_at is null`
+  assert.ok(activeBefore >= 4)
+
+  await sql`update cases set status = 'Resolved' where id = ${h.caseId}`
+  await cron(CRON_SECRET)
+
+  const [{ n: activeAfter }] = await sql`select count(*)::int n from notifications where source_id = ${h.caseId} and cancelled_at is null`
+  assert.equal(activeAfter, 0, 'all future reminders must be cancelled')
+  const [{ n: retained }] = await sql`select count(*)::int n from notifications where source_id = ${h.caseId}`
+  assert.ok(retained >= activeBefore, 'records are cancelled, not deleted')
+})
+
+test('R8: notification ownership — one user cannot read, acknowledge or dismiss another\u2019s', async () => {
+  const cite = `R8-${Date.now()}`
+  const h = await makeHearingCase({ email: `r8-${Date.now()}@example.test`, hearingAt: new Date(Date.now() + 3 * 3600000).toISOString(), citation: cite })
+  await cron(CRON_SECRET)
+  const [mine] = await sql`select id from notifications where source_id = ${h.caseId} and recipient_user_id = ${h.userId} limit 1`
+  assert.ok(mine, 'the agent has a reminder')
+
+  const attacker = await ensureUser(`r8-attacker-${Date.now()}@example.test`, 'CASE_AGENT')
+  for (const action of ['read', 'acknowledge', 'dismiss']) {
+    const res = await api('/api/notifications', attacker, 'PATCH', { action, id: mine.id })
+    assert.equal(res.status, 404, `${action} on another user's notification must be a neutral 404`)
+  }
+  const [row] = await sql`select read_at, acknowledged_at, dismissed_at from notifications where id = ${mine.id}`
+  assert.deepEqual([row.read_at, row.acknowledged_at, row.dismissed_at], [null, null, null],
+    'a rejected mutation must not change the row')
+
+  // The attacker's own list never contains it.
+  const list = await (await api('/api/notifications', attacker, 'GET')).json()
+  assert.ok(!JSON.stringify(list).includes(mine.id), 'it must not appear in another user\u2019s feed')
+})
+
+test('R9: critical reminders require acknowledgement and cannot be dismissed first', async () => {
+  const cite = `R9-${Date.now()}`
+  // 26 hours out so the critical 24h reminder is created, then advance the
+  // clock by backdating scheduled_for so the scheduler delivers it.
+  const h = await makeHearingCase({ email: `r9-${Date.now()}@example.test`, hearingAt: new Date(Date.now() + 26 * 3600000).toISOString(), citation: cite })
+  await cron(CRON_SECRET)
+  await sql`update notifications set scheduled_for = now() - interval '1 minute'
+             where source_id = ${h.caseId} and priority = 'critical' and delivery_status = 'pending'`
+  await cron(CRON_SECRET)
+
+  const [critical] = await sql`select id from notifications
+                                where source_id = ${h.caseId} and recipient_user_id = ${h.userId}
+                                  and priority = 'critical' and delivery_status = 'delivered' limit 1`
+  assert.ok(critical, 'a delivered critical reminder exists')
+
+  const dismissed = await api('/api/notifications', h.cookie, 'PATCH', { action: 'dismiss', id: critical.id })
+  assert.equal(dismissed.status, 409, 'an unacknowledged critical reminder must not be dismissible')
+
+  const ack = await api('/api/notifications', h.cookie, 'PATCH', { action: 'acknowledge', id: critical.id })
+  assert.equal(ack.status, 200, await ack.text())
+  const [row] = await sql`select acknowledged_at, acknowledged_by from notifications where id = ${critical.id}`
+  assert.ok(row.acknowledged_at, 'the acknowledgement time is recorded')
+  assert.equal(row.acknowledged_by, h.userId, 'who acknowledged it is recorded')
+
+  // Dismissing is allowed once acknowledged.
+  assert.equal((await api('/api/notifications', h.cookie, 'PATCH', { action: 'dismiss', id: critical.id })).status, 200)
+})
+
+test('R10: unacknowledged 24h reminders escalate once, preserving the original', async () => {
+  const cite = `R10-${Date.now()}`
+  const h = await makeHearingCase({ email: `r10-${Date.now()}@example.test`, hearingAt: new Date(Date.now() + 26 * 3600000).toISOString(), citation: cite })
+  await cron(CRON_SECRET)
+  // Deliver the 24h reminder, then push delivered_at past the grace period.
+  await sql`update notifications set scheduled_for = now() - interval '1 minute'
+             where source_id = ${h.caseId} and event_key like '%:24h' and delivery_status = 'pending'`
+  await cron(CRON_SECRET)
+  await sql`update notifications set delivered_at = now() - interval '45 minutes'
+             where source_id = ${h.caseId} and event_key like '%:24h'`
+
+  const [orig] = await sql`select id from notifications
+                            where source_id = ${h.caseId} and recipient_user_id = ${h.userId}
+                              and event_key like '%:24h' and delivery_status = 'delivered' limit 1`
+  assert.ok(orig, 'the 24h reminder was delivered to the agent')
+
+  await cron(CRON_SECRET)
+  const [{ n: esc1 }] = await sql`select count(*)::int n from notifications
+                                   where source_id = ${h.caseId} and event_key like '%:escalation'`
+  assert.ok(esc1 > 0, 'management escalation was created')
+
+  // Running again must not duplicate the escalation.
+  await cron(CRON_SECRET)
+  await cron(CRON_SECRET)
+  const [{ n: esc2 }] = await sql`select count(*)::int n from notifications
+                                   where source_id = ${h.caseId} and event_key like '%:escalation'`
+  assert.equal(esc2, esc1, 'escalation must not duplicate')
+
+  const [stillThere] = await sql`select id, cancelled_at from notifications where id = ${orig.id}`
+  assert.ok(stillThere && !stillThere.cancelled_at, 'the original agent reminder is preserved')
+})
+
+test('R11: overdue task reminders reach only the assignee and stop on completion', async () => {
+  const email = `r11-${Date.now()}@example.test`
+  await ensureUser(email, 'CASE_AGENT')
+  const [u] = await sql`select id from users where email = ${email.toLowerCase()}`
+  const past = new Date(Date.now() - 2 * 86400000).toISOString()
+  const [t] = await sql`insert into tasks (title, assignee_id, status, due_at, priority)
+                        values (${'R11-TASK-' + Date.now()}, ${u.id}, 'Open', ${past}, 'High') returning id`
+  await cron(CRON_SECRET)
+
+  const [{ n: mine }] = await sql`select count(*)::int n from notifications
+                                   where source_id = ${t.id} and recipient_user_id = ${u.id}`
+  assert.equal(mine, 1, 'the assignee is reminded once')
+  const [{ n: others }] = await sql`select count(*)::int n from notifications
+                                     where source_id = ${t.id} and recipient_user_id <> ${u.id}`
+  assert.equal(others, 0, 'nobody else is notified')
+
+  await sql`update tasks set status = 'Completed' where id = ${t.id}`
+  await cron(CRON_SECRET)
+  const [{ n: active }] = await sql`select count(*)::int n from notifications
+                                     where source_id = ${t.id} and cancelled_at is null`
+  assert.equal(active, 0, 'completing the task stops the reminder')
+})
+
+test('R12: payment reminders reach only roles with financial access', async () => {
+  const soon = new Date(Date.now() + 3 * 86400000).toISOString().slice(0, 10)
+  const [cust] = await sql`insert into customers (first_name,last_name,approval_status,next_payment_date)
+                           values (${'R12Cust' + Date.now()}, 'Payer', 'ACTIVE', ${soon}) returning id`
+  const billing = await ensureUser(`r12-billing-${Date.now()}@example.test`, 'BILLING')
+  const agentEmail = `r12-agent-${Date.now()}@example.test`
+  await ensureUser(agentEmail, 'CASE_AGENT')
+  assert.ok(billing)
+  await cron(CRON_SECRET)
+
+  const [{ n: toBilling }] = await sql`select count(*)::int n from notifications n
+                                        join users u on u.id = n.recipient_user_id
+                                       where n.source_id = ${cust.id} and u.role = 'BILLING'`
+  assert.ok(toBilling > 0, 'billing receives payment reminders')
+
+  const [{ n: toAgent }] = await sql`select count(*)::int n from notifications n
+                                      join users u on u.id = n.recipient_user_id
+                                     where n.source_id = ${cust.id} and u.role in ('CASE_AGENT','SALES_AGENT','DOCUMENT_STAFF')`
+  assert.equal(toAgent, 0, 'non-financial roles must never receive payment reminders')
+})
+
+test('R13: only valid ISO dates were backfilled into next_payment_date', async () => {
+  const base = Date.now()
+  await sql`insert into customers (first_name,last_name,approval_status,next_payment)
+            values (${'R13Good' + base}, 'Valid', 'ACTIVE', '2027-03-15')`
+  await sql`insert into customers (first_name,last_name,approval_status,next_payment)
+            values (${'R13Bad' + base}, 'Invalid', 'ACTIVE', 'whenever they pay')`
+  await sql`insert into customers (first_name,last_name,approval_status,next_payment)
+            values (${'R13Rollover' + base}, 'Impossible', 'ACTIVE', '2026-02-31')`
+
+  // Re-run exactly the migration's exception-safe backfill (idempotent).
+  await sql.unsafe(`do $$
+declare r record;
+begin
+  for r in select id, next_payment from customers
+            where next_payment_date is null and next_payment ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'
+  loop
+    begin
+      update customers set next_payment_date = r.next_payment::date where id = r.id;
+    exception when others then continue;
+    end;
+  end loop;
+end $$;`)
+
+  const [good] = await sql`select next_payment, next_payment_date from customers where first_name = ${'R13Good' + base}`
+  assert.equal(good.next_payment_date.toISOString().slice(0, 10), '2027-03-15', 'a valid date is converted')
+
+  const [bad] = await sql`select next_payment, next_payment_date from customers where first_name = ${'R13Bad' + base}`
+  assert.equal(bad.next_payment_date, null, 'invalid text is not converted')
+  assert.equal(bad.next_payment, 'whenever they pay', 'the original text is preserved')
+
+  const [roll] = await sql`select next_payment, next_payment_date from customers where first_name = ${'R13Rollover' + base}`
+  assert.equal(roll.next_payment_date, null, 'an impossible calendar date must never be silently rewritten')
+  assert.equal(roll.next_payment, '2026-02-31', 'the original text is preserved')
+})
+
+test('R14: document expiry reminders are generated at the defined intervals', async () => {
+  const email = `r14-${Date.now()}@example.test`
+  await ensureUser(email, 'CASE_AGENT')
+  const [u] = await sql`select id from users where email = ${email.toLowerCase()}`
+  const [cust] = await sql`insert into customers (first_name,last_name,agent_id,approval_status)
+                           values (${'R14Cust' + Date.now()}, 'Docs', ${u.id}, 'ACTIVE') returning id`
+  const in7 = new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10)
+  const [doc] = await sql`insert into documents (customer_id, category, file_name, expires_on)
+                          values (${cust.id}, 'CDL', ${'R14-' + Date.now() + '.pdf'}, ${in7}) returning id`
+  await cron(CRON_SECRET)
+
+  const [{ n }] = await sql`select count(*)::int n from notifications
+                             where source_id = ${doc.id} and recipient_user_id = ${u.id}`
+  assert.equal(n, 1, 'the assigned agent is reminded at the 7-day interval')
+  await cron(CRON_SECRET)
+  const [{ n: again }] = await sql`select count(*)::int n from notifications where source_id = ${doc.id}`
+  assert.ok(again >= 1)
+  const [{ n: dupes }] = await sql`select count(*)::int n from notifications
+                                    where source_id = ${doc.id} and recipient_user_id = ${u.id}`
+  assert.equal(dupes, 1, 'rerunning must not duplicate')
+})
+
+test('R15: disabled users cannot use reminders, and the feed requires a session', async () => {
+  const email = `r15-${Date.now()}@example.test`
+  const cookie = await ensureUser(email, 'CASE_AGENT')
+  const [u] = await sql`select id from users where email = ${email.toLowerCase()}`
+  assert.equal((await api('/api/notifications', cookie, 'GET')).status, 200)
+
+  await api('/api/users', (await owner()), 'PATCH', { id: u.id, status: 'DISABLED' })
+  const after = await api('/api/notifications', cookie, 'GET')
+  assert.ok([401, 403].includes(after.status), 'a disabled user cannot read reminders')
+
+  const anon = await fetch(`${BASE}/api/notifications`)
+  assert.equal(anon.status, 401, 'anonymous access is refused')
+})
+
+// ===========================================================================
+// Reminder hardening
+// ===========================================================================
+/** Delivers a hearing's pending reminders by advancing their scheduled_for. */
+async function deliverNow(caseId, keyLike = '%') {
+  await sql`update notifications set scheduled_for = now() - interval '1 minute'
+             where source_id = ${caseId} and delivery_status = 'pending' and event_key like ${keyLike}`
+  await cron(CRON_SECRET)
+}
+
+test('H1: rescheduling cancels an already-DELIVERED old reminder everywhere', async () => {
+  const cite = `H1-${Date.now()}`
+  const original = new Date(Date.now() + 26 * 3600000).toISOString()
+  const h = await makeHearingCase({ email: `h1-${Date.now()}@example.test`, hearingAt: original, citation: cite })
+  await cron(CRON_SECRET)
+  await deliverNow(h.caseId, '%:24h')
+
+  const [old24] = await sql`select id, delivery_status from notifications
+                             where source_id = ${h.caseId} and recipient_user_id = ${h.userId}
+                               and event_key like '%:24h' limit 1`
+  assert.equal(old24.delivery_status, 'delivered', 'precondition: the 24h reminder was delivered')
+
+  // (b) it is visible in the feed while still valid
+  const beforeFeed = await (await api('/api/notifications', h.cookie, 'GET')).text()
+  assert.ok(beforeFeed.includes(old24.id), 'the delivered reminder is in the feed before rescheduling')
+
+  // Reschedule.
+  const moved = new Date(Date.now() + 40 * 24 * 3600000).toISOString()
+  await sql`update cases set hearing_at = ${moved} where id = ${h.caseId}`
+  await cron(CRON_SECRET)
+
+  // (a) cancelled_at is set on the DELIVERED row, and it is preserved
+  const [after] = await sql`select cancelled_at, delivery_status from notifications where id = ${old24.id}`
+  assert.ok(after.cancelled_at, 'the delivered obsolete reminder must be cancelled')
+  assert.equal(after.delivery_status, 'delivered', 'history is preserved, not deleted')
+
+  // (b) gone from the active feed
+  const feed = await (await api('/api/notifications', h.cookie, 'GET')).text()
+  assert.ok(!feed.includes(old24.id), 'a cancelled reminder must disappear from the feed')
+
+  // (c) not mutable as active
+  for (const action of ['read', 'acknowledge', 'dismiss']) {
+    const res = await api('/api/notifications', h.cookie, 'PATCH', { action, id: old24.id })
+    assert.equal(res.status, 404, `${action} on a cancelled reminder must fail`)
+  }
+  const [untouched] = await sql`select read_at, acknowledged_at, dismissed_at from notifications where id = ${old24.id}`
+  assert.deepEqual([untouched.read_at, untouched.acknowledged_at, untouched.dismissed_at], [null, null, null])
+
+  // (d) it can never escalate
+  await sql`update notifications set delivered_at = now() - interval '2 hours' where id = ${old24.id}`
+  await cron(CRON_SECRET)
+  const [{ n: esc }] = await sql`select count(*)::int n from notifications
+                                  where source_id = ${h.caseId} and event_key like ${old24.id + '%'}`
+  assert.equal(esc, 0)
+  const [{ n: anyEsc }] = await sql`select count(*)::int n from notifications
+                                     where source_id = ${h.caseId} and event_key like ${'%' + new Date(original).toISOString() + '%:escalation'}`
+  assert.equal(anyEsc, 0, 'a cancelled reminder must never escalate')
+
+  // (e) reminders exist for the new date, created exactly once
+  const newFragment = new Date(moved).toISOString()
+  const fresh = await sql`select event_key from notifications
+                           where source_id = ${h.caseId} and cancelled_at is null
+                             and recipient_user_id = ${h.userId} and event_key like ${'%' + newFragment + '%'}`
+  assert.equal(fresh.length, 4, 'the new schedule produces exactly four reminders')
+  await cron(CRON_SECRET)
+  const again = await sql`select event_key from notifications
+                           where source_id = ${h.caseId} and cancelled_at is null
+                             and recipient_user_id = ${h.userId} and event_key like ${'%' + newFragment + '%'}`
+  assert.equal(again.length, 4, 'rerunning creates them exactly once')
+})
+
+test('H2: escalation follows the assigned agent only; management copies never trigger it', async () => {
+  const cite = `H2-${Date.now()}`
+  const h = await makeHearingCase({ email: `h2-${Date.now()}@example.test`, hearingAt: new Date(Date.now() + 26 * 3600000).toISOString(), citation: cite })
+  await cron(CRON_SECRET)
+  await deliverNow(h.caseId, '%:24h')
+
+  // Management copy exists and is unacknowledged, but the AGENT acknowledges.
+  const [ownerUser] = await sql`select id from users where email = 'owner@example.test'`
+  const [mgmtCopy] = await sql`select id, acknowledged_at from notifications
+                                where source_id = ${h.caseId} and recipient_user_id = ${ownerUser.id}
+                                  and event_key like '%:24h' limit 1`
+  assert.ok(mgmtCopy && !mgmtCopy.acknowledged_at, 'management copy is unacknowledged')
+
+  const [agentRow] = await sql`select id from notifications
+                                where source_id = ${h.caseId} and recipient_user_id = ${h.userId}
+                                  and event_key like '%:24h' limit 1`
+  const ack = await api('/api/notifications', h.cookie, 'PATCH', { action: 'acknowledge', id: agentRow.id })
+  assert.equal(ack.status, 200, await ack.text())
+
+  // Past the grace period, still no escalation because the AGENT acknowledged.
+  await sql`update notifications set delivered_at = now() - interval '2 hours'
+             where source_id = ${h.caseId} and event_key like '%:24h'`
+  await cron(CRON_SECRET)
+  const [{ n }] = await sql`select count(*)::int n from notifications
+                             where source_id = ${h.caseId} and event_key like '%:escalation'`
+  assert.equal(n, 0, 'an acknowledged agent reminder must prevent escalation entirely')
+})
+
+test('H3: an unacknowledged agent reminder escalates once per manager, after the grace period', async () => {
+  const cite = `H3-${Date.now()}`
+  const h = await makeHearingCase({ email: `h3-${Date.now()}@example.test`, hearingAt: new Date(Date.now() + 26 * 3600000).toISOString(), citation: cite })
+  await cron(CRON_SECRET)
+  await deliverNow(h.caseId, '%:24h')
+
+  // Same cron execution that delivered must NOT escalate.
+  const [{ n: immediate }] = await sql`select count(*)::int n from notifications
+                                        where source_id = ${h.caseId} and event_key like '%:escalation'`
+  assert.equal(immediate, 0, 'no escalation in the delivering run (grace period)')
+
+  // Still inside the grace window.
+  await sql`update notifications set delivered_at = now() - interval '5 minutes'
+             where source_id = ${h.caseId} and event_key like '%:24h'`
+  await cron(CRON_SECRET)
+  const [{ n: early }] = await sql`select count(*)::int n from notifications
+                                    where source_id = ${h.caseId} and event_key like '%:escalation'`
+  assert.equal(early, 0, 'no escalation before the grace period elapses')
+
+  // Past the grace window.
+  await sql`update notifications set delivered_at = now() - interval '45 minutes'
+             where source_id = ${h.caseId} and event_key like '%:24h'`
+  await cron(CRON_SECRET)
+  const escalations = await sql`select recipient_user_id from notifications
+                                 where source_id = ${h.caseId} and event_key like '%:escalation'`
+  assert.ok(escalations.length > 0, 'escalation occurs after the grace period')
+  const unique = new Set(escalations.map((e) => e.recipient_user_id))
+  assert.equal(unique.size, escalations.length, 'one escalation per manager, no duplicates')
+
+  // Concurrent reruns must not duplicate.
+  await Promise.all([cron(CRON_SECRET), cron(CRON_SECRET), cron(CRON_SECRET)])
+  const [{ n: after }] = await sql`select count(*)::int n from notifications
+                                    where source_id = ${h.caseId} and event_key like '%:escalation'`
+  assert.equal(after, escalations.length, 'concurrent runs must not duplicate escalations')
+})
+
+test('H4: the notifications page shows a case agent their own hearing notifications', async () => {
+  const cite = `H4-${Date.now()}`
+  const h = await makeHearingCase({ email: `h4-${Date.now()}@example.test`, hearingAt: new Date(Date.now() + 26 * 3600000).toISOString(), citation: cite })
+  await cron(CRON_SECRET)
+  await deliverNow(h.caseId, '%')
+
+  const html = await (await fetch(`${BASE}/notifications`, { headers: { cookie: h.cookie } })).text()
+  assert.ok(!html.includes('Not available'), 'a case agent must be able to open their notifications')
+  assert.ok(html.includes('Hearing'), 'hearing notifications are listed')
+  assert.ok(html.includes(cite), 'the reminder content is visible to its recipient')
+
+  // Another agent must not see them.
+  const stranger = await ensureUser(`h4-stranger-${Date.now()}@example.test`, 'CASE_AGENT')
+  const strangerHtml = await (await fetch(`${BASE}/notifications`, { headers: { cookie: stranger } })).text()
+  assert.ok(!strangerHtml.includes(cite), 'another recipient\u2019s notifications must not appear')
+})
+
+test('H5: acknowledge applies only to delivered, active, critical hearing reminders', async () => {
+  const cite = `H5-${Date.now()}`
+  const h = await makeHearingCase({ email: `h5-${Date.now()}@example.test`, hearingAt: new Date(Date.now() + 26 * 3600000).toISOString(), citation: cite })
+  await cron(CRON_SECRET)
+
+  // Pending (undelivered) reminder cannot be mutated.
+  const [pending] = await sql`select id from notifications
+                               where source_id = ${h.caseId} and recipient_user_id = ${h.userId}
+                                 and delivery_status = 'pending' limit 1`
+  assert.ok(pending)
+  for (const action of ['read', 'acknowledge', 'dismiss']) {
+    const res = await api('/api/notifications', h.cookie, 'PATCH', { action, id: pending.id })
+    assert.equal(res.status, 404, `${action} on a pending notification must fail`)
+  }
+
+  // A delivered NON-critical reminder cannot be acknowledged.
+  await deliverNow(h.caseId, '%')
+  const [normal] = await sql`select id from notifications
+                              where source_id = ${h.caseId} and recipient_user_id = ${h.userId}
+                                and priority <> 'critical' and delivery_status = 'delivered' limit 1`
+  if (normal) {
+    const res = await api('/api/notifications', h.cookie, 'PATCH', { action: 'acknowledge', id: normal.id })
+    assert.equal(res.status, 404, 'only critical hearing reminders may be acknowledged')
+  }
+})
+
+test('H6: a customer created through the API receives the correct payment reminder', async () => {
+  const soon = new Date(Date.now() + 3 * 86400000).toISOString().slice(0, 10)
+  const name = `H6Cust${Date.now()}`
+  const res = await api('/api/customers', (await owner()), 'POST', {
+    firstName: name, lastName: 'ApiCreated', nextPayment: soon, plan: 'Individual Plan',
+  })
+  assert.equal(res.status, 200, await res.text())
+  const [c] = await sql`select id, next_payment, next_payment_date from customers where first_name = ${name}`
+  assert.equal(c.next_payment, soon, 'the legacy text field is written')
+  assert.equal(new Date(c.next_payment_date).toISOString().slice(0, 10), soon, 'the validated date column is written')
+
+  await cron(CRON_SECRET)
+  const billing = await ensureUser(`h6-billing-${Date.now()}@example.test`, 'BILLING')
+  assert.ok(billing)
+  const [{ n }] = await sql`select count(*)::int n from notifications where source_id = ${c.id} and type = 'payment'`
+  assert.ok(n > 0, 'a payment reminder is generated for the API-created customer')
+})
+
+test('H7: document expiry is set through the API and drives reminders', async () => {
+  const email = `h7-${Date.now()}@example.test`
+  const cookie = await ensureUser(email, 'CASE_AGENT')
+  const [u] = await sql`select id from users where email = ${email.toLowerCase()}`
+  const [cust] = await sql`insert into customers (first_name,last_name,agent_id,approval_status)
+                           values (${'H7Cust' + Date.now()}, 'Docs', ${u.id}, 'ACTIVE') returning id`
+  const in7 = new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10)
+
+  const created = await api('/api/documents', cookie, 'POST', {
+    customerId: cust.id, category: 'CDL', fileName: `H7-${Date.now()}.pdf`, expiresOn: in7,
+  })
+  const createdBody = await created.json().catch(() => ({}))
+  assert.equal(created.status, 200, JSON.stringify(createdBody))
+  const { id } = createdBody
+
+  // Invalid calendar dates are rejected.
+  const bad = await api('/api/documents', cookie, 'PATCH', { id, expiresOn: '2026-02-31' })
+  assert.equal(bad.status, 400, 'an impossible expiry date must be refused')
+
+  await cron(CRON_SECRET)
+  const [{ n }] = await sql`select count(*)::int n from notifications
+                             where source_id = ${id} and recipient_user_id = ${u.id}`
+  assert.equal(n, 1, 'the 7-day document reminder reaches the assigned agent')
+
+  // Another agent cannot change it.
+  const stranger = await ensureUser(`h7-stranger-${Date.now()}@example.test`, 'CASE_AGENT')
+  const denied = await api('/api/documents', stranger, 'PATCH', { id, expiresOn: in7 })
+  assert.equal(denied.status, 404, 'a foreign document must not be editable')
+})
+
+// ===========================================================================
+// Input-path timezone safety and reconciliation
+// ===========================================================================
+test('X1: a blank or unknown state cannot store a silent Pacific hearing timezone', async () => {
+  const cookie = await owner()
+  const [cust] = await sql`insert into customers (first_name,last_name,approval_status)
+                           values (${'X1Cust' + Date.now()}, 'Tz', 'ACTIVE') returning id`
+  const soon = new Date(Date.now() + 9 * 86400000).toISOString()
+  const [{ n: before }] = await sql`select count(*)::int n from cases`
+
+  for (const state of ['', '   ', 'ZZ', 'Califrnia', 'Not A State']) {
+    const res = await api('/api/cases', cookie, 'POST', {
+      customerId: cust.id, citation: `X1-${state || 'blank'}-${Date.now()}`, state, hearingAt: soon,
+    })
+    assert.equal(res.status, 400, `state "${state}" must be refused for a hearing date`)
+  }
+  const [{ n: after }] = await sql`select count(*)::int n from cases`
+  assert.equal(after, before, 'a rejected request must write no case row')
+
+  // An invalid explicit timezone is refused too.
+  const badTz = await api('/api/cases', cookie, 'POST', {
+    customerId: cust.id, citation: `X1-BADTZ-${Date.now()}`, state: 'CA', hearingAt: soon, hearingTz: 'Mars/Olympus',
+  })
+  assert.equal(badTz.status, 400, 'an invalid IANA zone must be refused')
+
+  // A recognised state works, and an explicit zone overrides it.
+  const good = await api('/api/cases', cookie, 'POST', {
+    customerId: cust.id, citation: `X1-OK-${Date.now()}`, state: 'WA', hearingAt: soon,
+  })
+  assert.equal(good.status, 200, await good.text())
+  const explicit = await api('/api/cases', cookie, 'POST', {
+    customerId: cust.id, citation: `X1-EXPLICIT-${Date.now()}`, state: 'TX', hearingAt: soon, hearingTz: 'America/Denver',
+  })
+  assert.equal(explicit.status, 200)
+  const [row] = await sql`select hearing_tz from cases where citation like 'X1-EXPLICIT-%' order by created_at desc limit 1`
+  assert.equal(row.hearing_tz, 'America/Denver', 'the explicit selection wins over the state default')
+})
+
+test('X2: the hearing update rejects an unresolvable timezone and leaves the case unchanged', async () => {
+  const cite = `X2-${Date.now()}`
+  const h = await makeHearingCase({ email: `x2-${Date.now()}@example.test`, hearingAt: new Date(Date.now() + 9 * 86400000).toISOString(), citation: cite })
+  await sql`update cases set state = 'ZZ' where id = ${h.caseId}`
+  const [before] = await sql`select hearing_at, hearing_tz, status from cases where id = ${h.caseId}`
+
+  const res = await api('/api/hearings', (await owner()), 'POST', {
+    caseId: h.caseId, hearingType: 'Zoom', hearingAt: new Date(Date.now() + 12 * 86400000).toISOString(), state: 'ZZ',
+  })
+  assert.equal(res.status, 400, 'an unrecognised state must be refused')
+  const [after] = await sql`select hearing_at, hearing_tz, status from cases where id = ${h.caseId}`
+  assert.deepEqual(
+    { a: after.hearing_at?.toISOString(), t: after.hearing_tz, s: after.status },
+    { a: before.hearing_at?.toISOString(), t: before.hearing_tz, s: before.status },
+    'a rejected hearing update must leave the case untouched',
+  )
+})
+
+test('X3: clearing the hearing date cancels every old reminder immediately', async () => {
+  const cite = `X3-${Date.now()}`
+  const h = await makeHearingCase({ email: `x3-${Date.now()}@example.test`, hearingAt: new Date(Date.now() + 26 * 3600000).toISOString(), citation: cite })
+  await cron(CRON_SECRET)
+  await deliverNow(h.caseId, '%:24h')
+  const [old] = await sql`select id from notifications where source_id = ${h.caseId}
+                           and recipient_user_id = ${h.userId} and event_key like '%:24h' limit 1`
+  assert.ok(old)
+
+  // Clear the hearing through the API; no cron run in between.
+  const res = await api('/api/hearings', (await owner()), 'POST', {
+    caseId: h.caseId, hearingAt: '', status: 'Action Required', hearingType: 'In person',
+  })
+  assert.equal(res.status, 200, await res.text())
+
+  const [{ n: active }] = await sql`select count(*)::int n from notifications
+                                     where source_id = ${h.caseId} and cancelled_at is null`
+  assert.equal(active, 0, 'clearing the hearing must cancel reminders in the same operation')
+
+  const feed = await (await api('/api/notifications', h.cookie, 'GET')).text()
+  assert.ok(!feed.includes(old.id), 'the cancelled reminder must leave the feed')
+  for (const action of ['read', 'acknowledge', 'dismiss']) {
+    assert.equal((await api('/api/notifications', h.cookie, 'PATCH', { action, id: old.id })).status, 404)
+  }
+  await sql`update notifications set delivered_at = now() - interval '2 hours' where id = ${old.id}`
+  await cron(CRON_SECRET)
+  const [{ n: esc }] = await sql`select count(*)::int n from notifications
+                                  where source_id = ${h.caseId} and event_key like '%:escalation'`
+  assert.equal(esc, 0, 'a cleared hearing must never escalate')
+})
+
+test('X4: reassigning a case moves the reminders to the new agent', async () => {
+  const cite = `X4-${Date.now()}`
+  const a = await makeHearingCase({ email: `x4a-${Date.now()}@example.test`, hearingAt: new Date(Date.now() + 26 * 3600000).toISOString(), citation: cite })
+  await cron(CRON_SECRET)
+  await deliverNow(a.caseId, '%')
+  const [aRow] = await sql`select id from notifications where source_id = ${a.caseId}
+                            and recipient_user_id = ${a.userId} limit 1`
+  assert.ok(aRow, 'Agent A has a reminder')
+
+  const bEmail = `x4b-${Date.now()}@example.test`
+  await ensureUser(bEmail, 'CASE_AGENT')
+  const [b] = await sql`select id from users where email = ${bEmail.toLowerCase()}`
+  await sql`update cases set agent_id = ${b.id} where id = ${a.caseId}`
+  await cron(CRON_SECRET)
+
+  const [aAfter] = await sql`select cancelled_at from notifications where id = ${aRow.id}`
+  assert.ok(aAfter.cancelled_at, 'the former agent\u2019s reminder must be cancelled')
+  for (const action of ['read', 'acknowledge', 'dismiss']) {
+    assert.equal((await api('/api/notifications', a.cookie, 'PATCH', { action, id: aRow.id })).status, 404)
+  }
+  // The hearing is 26 hours out, so only the 24h and 2h intervals remain.
+  const bRows = await sql`select event_key from notifications
+                           where source_id = ${a.caseId} and recipient_user_id = ${b.id} and cancelled_at is null`
+  assert.equal(bRows.length, 2, 'the new agent receives the still-applicable reminders')
+  const bKeys = bRows.map((r) => r.event_key.split(':').pop()).sort()
+  assert.deepEqual(bKeys, ['24h', '2h'].sort())
+})
+
+test('X5: a demoted management recipient loses their reminder copy', async () => {
+  const cite = `X5-${Date.now()}`
+  const mgrEmail = `x5-mgr-${Date.now()}@example.test`
+  await ensureUser(mgrEmail, 'MANAGER')
+  const [mgr] = await sql`select id from users where email = ${mgrEmail.toLowerCase()}`
+  const h = await makeHearingCase({ email: `x5-${Date.now()}@example.test`, hearingAt: new Date(Date.now() + 26 * 3600000).toISOString(), citation: cite })
+  await cron(CRON_SECRET)
+
+  const [copy] = await sql`select id from notifications where source_id = ${h.caseId}
+                            and recipient_user_id = ${mgr.id} and cancelled_at is null limit 1`
+  assert.ok(copy, 'the manager received a copy')
+
+  // Demote to a role with no management visibility.
+  await sql`update users set role = 'CASE_AGENT' where id = ${mgr.id}`
+  await cron(CRON_SECRET)
+  const [after] = await sql`select cancelled_at from notifications where id = ${copy.id}`
+  assert.ok(after.cancelled_at, 'a demoted manager\u2019s copy must be cancelled')
+})
+
+test('X6: a timezone-only correction cancels the old text and regenerates it', async () => {
+  const cite = `X6-${Date.now()}`
+  const instant = new Date(Date.now() + 9 * 86400000).toISOString()
+  const h = await makeHearingCase({ email: `x6-${Date.now()}@example.test`, hearingAt: instant, tz: 'America/Los_Angeles', citation: cite })
+  await cron(CRON_SECRET)
+  const [oldRow] = await sql`select id, message from notifications where source_id = ${h.caseId}
+                              and recipient_user_id = ${h.userId} limit 1`
+  assert.ok(oldRow.message.includes('PST') || oldRow.message.includes('PDT'), 'original message is Pacific')
+
+  // Same UTC instant, corrected court timezone.
+  const res = await api('/api/hearings', (await owner()), 'POST', {
+    caseId: h.caseId, hearingAt: instant, hearingTz: 'America/New_York', hearingType: 'Zoom',
+  })
+  assert.equal(res.status, 200, await res.text())
+
+  const [old] = await sql`select cancelled_at from notifications where id = ${oldRow.id}`
+  assert.ok(old.cancelled_at, 'the reminder written with the old timezone must be cancelled')
+  const [fresh] = await sql`select message from notifications where source_id = ${h.caseId}
+                             and recipient_user_id = ${h.userId} and cancelled_at is null limit 1`
+  assert.ok(fresh && (fresh.message.includes('EST') || fresh.message.includes('EDT')),
+    'the replacement must use the corrected court timezone')
+})
+
+test('X7: an unresolvable legacy timezone yields UTC plus a visible warning', async () => {
+  const cite = `X7-${Date.now()}`
+  const h = await makeHearingCase({ email: `x7-${Date.now()}@example.test`, hearingAt: new Date(Date.now() + 9 * 86400000).toISOString(), citation: cite })
+  // Legacy corruption applied directly, as a pre-strict row would look.
+  await sql`update cases set hearing_tz = 'Mars/Olympus', state = 'ZZ' where id = ${h.caseId}`
+  await cron(CRON_SECRET)
+
+  const [row] = await sql`select message from notifications where source_id = ${h.caseId}
+                           and recipient_user_id = ${h.userId} and cancelled_at is null limit 1`
+  assert.ok(row, 'a reminder still exists')
+  assert.ok(row.message.includes('TIMEZONE NEEDS REVIEW'), 'the reminder must carry the warning')
+  assert.ok(!row.message.includes('PST') && !row.message.includes('PDT'), 'never a plausible Pacific time')
+
+  const html = await (await fetch(`${BASE}/hearings`, { headers: { cookie: h.cookie } })).text()
+  assert.ok(html.includes('TIMEZONE NEEDS REVIEW'), 'the list page shows the warning')
+})
+
+test('X8: stale non-hearing reminders are cancelled on their transitions', async () => {
+  const cookie = await owner()
+  // Invoice paid.
+  const [cust] = await sql`insert into customers (first_name,last_name,approval_status)
+                           values (${'X8Cust' + Date.now()}, 'Stale', 'ACTIVE') returning id`
+  const [pay] = await sql`insert into payments (customer_id, kind, method, amount, status, invoice)
+                          values (${cust.id}, 'Membership', 'Card', 100, 'Overdue', ${'INV-X8-' + Date.now()}) returning id`
+  await cron(CRON_SECRET)
+  const [{ n: before }] = await sql`select count(*)::int n from notifications where source_id = ${pay.id} and cancelled_at is null`
+  assert.ok(before > 0, 'an overdue invoice reminder exists')
+  await sql`update payments set status = 'Paid' where id = ${pay.id}`
+  await cron(CRON_SECRET)
+  const [{ n: after }] = await sql`select count(*)::int n from notifications where source_id = ${pay.id} and cancelled_at is null`
+  assert.equal(after, 0, 'a paid invoice cancels its reminder')
+
+  // Next payment date changed.
+  const soon = new Date(Date.now() + 3 * 86400000).toISOString().slice(0, 10)
+  await sql`update customers set next_payment_date = ${soon} where id = ${cust.id}`
+  await cron(CRON_SECRET)
+  const [{ n: payBefore }] = await sql`select count(*)::int n from notifications
+                                        where source_id = ${cust.id} and type = 'payment' and cancelled_at is null`
+  assert.ok(payBefore > 0)
+  await sql`update customers set next_payment_date = null where id = ${cust.id}`
+  await cron(CRON_SECRET)
+  const [{ n: payAfter }] = await sql`select count(*)::int n from notifications
+                                       where source_id = ${cust.id} and type = 'payment' and cancelled_at is null`
+  assert.equal(payAfter, 0, 'clearing the date cancels the payment reminder')
+
+  // Document expiry changed.
+  const in7 = new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10)
+  const created = await api('/api/documents', cookie, 'POST', {
+    customerId: cust.id, category: 'CDL', fileName: `X8-${Date.now()}.pdf`, expiresOn: in7,
+  })
+  const createdBody = await created.json().catch(() => ({}))
+  assert.equal(created.status, 200, JSON.stringify(createdBody))
+  await cron(CRON_SECRET)
+  const [{ n: docBefore }] = await sql`select count(*)::int n from notifications
+                                        where source_id = ${createdBody.id} and cancelled_at is null`
+  assert.ok(docBefore > 0)
+  const moved = new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10)
+  assert.equal((await api('/api/documents', cookie, 'PATCH', { id: createdBody.id, expiresOn: moved })).status, 200)
+  await cron(CRON_SECRET)
+  const [{ n: docStale }] = await sql`select count(*)::int n from notifications
+                                       where source_id = ${createdBody.id} and cancelled_at is null
+                                         and event_key like ${'doc-expiry:' + in7 + ':%'}`
+  assert.equal(docStale, 0, 'the reminder for the old expiry date is cancelled')
+
+  // Task completed.
+  const email = `x8-task-${Date.now()}@example.test`
+  await ensureUser(email, 'CASE_AGENT')
+  const [u] = await sql`select id from users where email = ${email.toLowerCase()}`
+  const [t] = await sql`insert into tasks (title, assignee_id, status, due_at, priority)
+                        values (${'X8-TASK-' + Date.now()}, ${u.id}, 'Open', ${new Date(Date.now() - 86400000).toISOString()}, 'Normal') returning id`
+  await cron(CRON_SECRET)
+  const [{ n: taskBefore }] = await sql`select count(*)::int n from notifications where source_id = ${t.id} and cancelled_at is null`
+  assert.ok(taskBefore > 0)
+  await sql`update tasks set status = 'Completed' where id = ${t.id}`
+  await cron(CRON_SECRET)
+  const [{ n: taskAfter }] = await sql`select count(*)::int n from notifications where source_id = ${t.id} and cancelled_at is null`
+  assert.equal(taskAfter, 0, 'completing a task cancels its reminder')
+})
+
+test('X9: document permissions are explicit and scoped users cannot create orphans', async () => {
+  const [cust] = await sql`insert into customers (first_name,last_name,approval_status)
+                           values (${'X9Cust' + Date.now()}, 'Perm', 'ACTIVE') returning id`
+  // READ_ONLY and BILLING hold no document write permission.
+  for (const role of ['READ_ONLY', 'BILLING']) {
+    const cookie = await ensureUser(`x9-${role.toLowerCase()}-${Date.now()}@example.test`, role)
+    const res = await api('/api/documents', cookie, 'POST', { customerId: cust.id, category: 'CDL', fileName: 'x9.pdf' })
+    assert.equal(res.status, 403, `${role} must not create documents`)
+  }
+  // CASE_AGENT is the DOCUMENT-SCOPED role under the documented policy
+  // (DOCUMENT_STAFF has company-wide document access — see Y7).
+  const agentEmail = `x9-agent-${Date.now()}@example.test`
+  const agent = await ensureUser(agentEmail, 'CASE_AGENT')
+  const [au] = await sql`select id from users where email = ${agentEmail.toLowerCase()}`
+  const [own] = await sql`insert into customers (first_name,last_name,agent_id,approval_status)
+                          values (${'X9Own' + Date.now()}, 'Agent', ${au.id}, 'ACTIVE') returning id`
+  const ok = await api('/api/documents', agent, 'POST', { customerId: own.id, category: 'CDL', fileName: 'x9-ok.pdf' })
+  assert.equal(ok.status, 200, await ok.text())
+
+  // A document-scoped user cannot create an orphan they could never see again.
+  const orphan = await api('/api/documents', agent, 'POST', { category: 'Other', fileName: 'x9-orphan.pdf' })
+  assert.equal(orphan.status, 400, 'an orphan document must be refused for a scoped user')
+
+  // Cross-customer access is refused.
+  const cross = await api('/api/documents', agent, 'POST', { customerId: cust.id, category: 'CDL', fileName: 'x9-cross.pdf' })
+  assert.equal(cross.status, 404, 'a customer they cannot see must be refused')
+})
+
+// ===========================================================================
+// Final remediation
+// ===========================================================================
+test('Y1: both forms render the court timezone selector', async () => {
+  const cookie = await owner()
+  const caseForm = await (await fetch(`${BASE}/cases/new`, { headers: { cookie } })).text()
+  assert.ok(caseForm.includes('Court timezone'), 'the case form must render the selector')
+  assert.ok(caseForm.includes('America/Denver'), 'selector options must be present')
+
+  const h = await makeHearingCase({ email: `y1-${Date.now()}@example.test`, hearingAt: new Date(Date.now() + 9 * 86400000).toISOString(), citation: `Y1-${Date.now()}` })
+  const hearingForm = await (await fetch(`${BASE}/hearings/${h.caseId}`, { headers: { cookie } })).text()
+  assert.ok(hearingForm.includes('Court timezone'), 'the hearing form must render the selector')
+})
+
+test('Y2: Texas/Denver hearing — a non-time edit preserves hearing_at and hearing_tz', async () => {
+  const cookie = await owner()
+  const [cust] = await sql`insert into customers (first_name,last_name,approval_status)
+                           values (${'Y2Cust' + Date.now()}, 'Tz', 'ACTIVE') returning id`
+  // 1. Create a Texas hearing explicitly in America/Denver.
+  const instant = new Date(Date.now() + 9 * 86400000).toISOString()
+  const created = await api('/api/cases', cookie, 'POST', {
+    customerId: cust.id, citation: `Y2-${Date.now()}`, state: 'TX',
+    hearingAt: instant, hearingTz: 'America/Denver', status: 'Hearing Scheduled',
+  })
+  const createdBody = await created.json().catch(() => ({}))
+  assert.equal(created.status, 200, JSON.stringify(createdBody))
+  const caseId = createdBody.id
+  const [before] = await sql`select hearing_at, hearing_tz from cases where id = ${caseId}`
+  assert.equal(before.hearing_tz, 'America/Denver', 'the explicit zone is stored, not the Texas default')
+
+  // 2-4. Edit ONLY the preparation status, submitting the form's existing values.
+  const save = await api('/api/hearings', cookie, 'POST', {
+    caseId, hearingAt: before.hearing_at.toISOString(), hearingTz: before.hearing_tz,
+    hearingType: 'In person', prepStatus: 'Ready', status: 'Hearing Scheduled', state: 'TX',
+  })
+  assert.equal(save.status, 200, await save.text())
+
+  // 5. Neither the instant nor the timezone moved.
+  const [after] = await sql`select hearing_at, hearing_tz, prep_status from cases where id = ${caseId}`
+  assert.equal(after.hearing_at.toISOString(), before.hearing_at.toISOString(), 'hearing_at must not move')
+  assert.equal(after.hearing_tz, 'America/Denver', 'hearing_tz must be preserved exactly')
+  assert.equal(after.prep_status, 'Ready')
+
+  // 6-7. Deliberately change the timezone; the stored zone and instant are correct.
+  const changed = await api('/api/hearings', cookie, 'POST', {
+    caseId, hearingAt: before.hearing_at.toISOString(), hearingTz: 'America/Chicago',
+    hearingType: 'In person', prepStatus: 'Ready', status: 'Hearing Scheduled', state: 'TX',
+  })
+  assert.equal(changed.status, 200, await changed.text())
+  const [final] = await sql`select hearing_at, hearing_tz from cases where id = ${caseId}`
+  assert.equal(final.hearing_tz, 'America/Chicago')
+  assert.equal(final.hearing_at.toISOString(), before.hearing_at.toISOString(),
+    'a timezone-only correction keeps the same UTC instant')
+
+  // The reminder identity changed, so old-timezone content is cancelled.
+  const [{ n: staleActive }] = await sql`select count(*)::int n from notifications
+                                          where source_id = ${caseId} and cancelled_at is null
+                                            and event_key like '%America/Denver%'`
+  assert.equal(staleActive, 0, 'reminders written in the old zone must be cancelled')
+})
+
+test('Y3: reassignment through the real API moves reminders immediately, no cron', async () => {
+  const cite = `Y3-${Date.now()}`
+  const a = await makeHearingCase({ email: `y3a-${Date.now()}@example.test`, hearingAt: new Date(Date.now() + 26 * 3600000).toISOString(), citation: cite })
+  await cron(CRON_SECRET)
+  await deliverNow(a.caseId, '%')
+  const [aRow] = await sql`select id from notifications where source_id = ${a.caseId}
+                            and recipient_user_id = ${a.userId} and cancelled_at is null limit 1`
+  assert.ok(aRow, 'Agent A has an active reminder')
+
+  const bEmail = `y3b-${Date.now()}@example.test`
+  await ensureUser(bEmail, 'CASE_AGENT')
+  const [b] = await sql`select id from users where email = ${bEmail.toLowerCase()}`
+
+  // Real workflow: the assignment API, with NO cron run afterwards.
+  const res = await api('/api/assign', (await owner()), 'POST', { customerId: a.customerId, agentId: b.id })
+  assert.equal(res.status, 200, await res.text())
+
+  const [aAfter] = await sql`select cancelled_at from notifications where id = ${aRow.id}`
+  assert.ok(aAfter.cancelled_at, 'the former agent loses it immediately')
+  const feed = await (await api('/api/notifications', a.cookie, 'GET')).text()
+  assert.ok(!feed.includes(aRow.id), 'it disappears from the former agent\u2019s feed')
+  for (const action of ['read', 'acknowledge', 'dismiss']) {
+    assert.equal((await api('/api/notifications', a.cookie, 'PATCH', { action, id: aRow.id })).status, 404)
+  }
+  const [{ n: bCount }] = await sql`select count(*)::int n from notifications
+                                     where source_id = ${a.caseId} and recipient_user_id = ${b.id} and cancelled_at is null`
+  assert.ok(bCount > 0, 'the new agent receives reminders immediately')
+})
+
+test('Y4: disabling a manager immediately cancels their reminder copies', async () => {
+  const mgrEmail = `y4-mgr-${Date.now()}@example.test`
+  await ensureUser(mgrEmail, 'MANAGER')
+  const [mgr] = await sql`select id from users where email = ${mgrEmail.toLowerCase()}`
+  const h = await makeHearingCase({ email: `y4-${Date.now()}@example.test`, hearingAt: new Date(Date.now() + 26 * 3600000).toISOString(), citation: `Y4-${Date.now()}` })
+  await cron(CRON_SECRET)
+  const [copy] = await sql`select id from notifications where source_id = ${h.caseId}
+                            and recipient_user_id = ${mgr.id} and cancelled_at is null limit 1`
+  assert.ok(copy, 'the manager has a copy')
+
+  // Real workflow: the users API, no cron afterwards.
+  const res = await api('/api/users', (await owner()), 'PATCH', { id: mgr.id, status: 'DISABLED' })
+  assert.equal(res.status, 200, await res.text())
+  const [after] = await sql`select cancelled_at from notifications where id = ${copy.id}`
+  assert.ok(after.cancelled_at, 'a disabled manager\u2019s copy must be cancelled immediately')
+})
+
+test('Y5: a failing reconciliation rolls back the case update', async () => {
+  const cite = `Y5-${Date.now()}`
+  const h = await makeHearingCase({ email: `y5-${Date.now()}@example.test`, hearingAt: new Date(Date.now() + 9 * 86400000).toISOString(), citation: cite })
+  const [before] = await sql`select hearing_at, hearing_tz, prep_status from cases where id = ${h.caseId}`
+
+  // Force reconciliation to fail inside the transaction with a constraint that
+  // only the reconciliation write can violate.
+  await sql`alter table notifications add constraint y5_block check (type <> 'hearing') not valid`
+  try {
+    const res = await api('/api/hearings', (await owner()), 'POST', {
+      caseId: h.caseId, hearingAt: new Date(Date.now() + 15 * 86400000).toISOString(),
+      hearingTz: 'America/New_York', hearingType: 'Zoom', prepStatus: 'Ready', status: 'Hearing Scheduled',
+    })
+    assert.equal(res.status, 500, 'a reconciliation failure must not return success')
+    const [after] = await sql`select hearing_at, hearing_tz, prep_status from cases where id = ${h.caseId}`
+    assert.deepEqual(
+      { a: after.hearing_at?.toISOString(), t: after.hearing_tz, p: after.prep_status },
+      { a: before.hearing_at?.toISOString(), t: before.hearing_tz, p: before.prep_status },
+      'the case update must be rolled back',
+    )
+  } finally {
+    await sql`alter table notifications drop constraint if exists y5_block`
+  }
+})
+
+test('Y6: document expiry can be set, changed and cleared through the UI control', async () => {
+  const cookie = await owner()
+  const [cust] = await sql`insert into customers (first_name,last_name,approval_status)
+                           values (${'Y6Cust' + Date.now()}, 'Docs', 'ACTIVE') returning id`
+  const in7 = new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10)
+  const created = await api('/api/documents', cookie, 'POST', {
+    customerId: cust.id, category: 'CDL', fileName: `Y6-${Date.now()}.pdf`, expiresOn: in7,
+  })
+  const body = await created.json().catch(() => ({}))
+  assert.equal(created.status, 200, JSON.stringify(body))
+
+  // The page displays it and offers the control to an authorised role.
+  const html = await (await fetch(`${BASE}/documents`, { headers: { cookie } })).text()
+  assert.ok(html.includes('Expires'), 'the expiry column is displayed')
+  assert.ok(html.includes('Save'), 'the authorised editor is rendered')
+
+  // Impossible dates are rejected.
+  assert.equal((await api('/api/documents', cookie, 'PATCH', { id: body.id, expiresOn: '2026-02-31' })).status, 400)
+  // Clearing works.
+  assert.equal((await api('/api/documents', cookie, 'PATCH', { id: body.id, expiresOn: '' })).status, 200)
+  const [row] = await sql`select expires_on from documents where id = ${body.id}`
+  assert.equal(row.expires_on, null, 'the expiry date is cleared')
+})
+
+test('Y7: DOCUMENT_STAFF has usable company-wide document access; agents stay scoped', async () => {
+  const [cust] = await sql`insert into customers (first_name,last_name,approval_status)
+                           values (${'Y7Cust' + Date.now()}, 'Any', 'ACTIVE') returning id`
+  // DOCUMENT_STAFF owns no customers but must still be able to file documents.
+  const staff = await ensureUser(`y7-staff-${Date.now()}@example.test`, 'DOCUMENT_STAFF')
+  const ok = await api('/api/documents', staff, 'POST', { customerId: cust.id, category: 'CDL', fileName: `Y7-${Date.now()}.pdf` })
+  assert.equal(ok.status, 200, `DOCUMENT_STAFF must have usable access: ${await ok.text()}`)
+
+  // A CASE_AGENT may not touch another agent's customer's document.
+  const agent = await ensureUser(`y7-agent-${Date.now()}@example.test`, 'CASE_AGENT')
+  const denied = await api('/api/documents', agent, 'POST', { customerId: cust.id, category: 'CDL', fileName: 'y7-x.pdf' })
+  assert.equal(denied.status, 404, 'a case agent stays scoped to assigned customers')
+})
+
+test('Y8: notification counts are computed beyond the first 50 rows', async () => {
+  const email = `y8-${Date.now()}@example.test`
+  const cookie = await ensureUser(email, 'CASE_AGENT')
+  const [u] = await sql`select id from users where email = ${email.toLowerCase()}`
+  for (let i = 0; i < 60; i++) {
+    await sql`insert into notifications (recipient_user_id, type, priority, source_type, source_id, event_key,
+                                         title, message, scheduled_for, delivery_status, delivered_at)
+              values (${u.id}, 'task', 'normal', 'task', ${'y8-' + i}, ${'y8-key-' + i},
+                      ${'Y8 ' + i}, 'bulk', now() - interval '1 minute', 'delivered', now())`
+  }
+  const res = await api('/api/notifications', cookie, 'GET')
+  const body = await res.json()
+  assert.ok(body.items.length <= 50, 'the page is limited')
+  assert.equal(body.unread, 60, 'the unread count covers every active delivered row, not just the page')
+})
+
+test('Z1: a failing reconciliation rolls back the entire assignment', async () => {
+  const cite = `Z1-${Date.now()}`
+  const a = await makeHearingCase({ email: `z1a-${Date.now()}@example.test`, hearingAt: new Date(Date.now() + 26 * 3600000).toISOString(), citation: cite })
+  await cron(CRON_SECRET)
+  const bEmail = `z1b-${Date.now()}@example.test`
+  await ensureUser(bEmail, 'CASE_AGENT')
+  const [b] = await sql`select id from users where email = ${bEmail.toLowerCase()}`
+
+  const [custBefore] = await sql`select agent_id from customers where id = ${a.customerId}`
+  const [caseBefore] = await sql`select agent_id from cases where id = ${a.caseId}`
+  const notifBefore = await sql`select id, cancelled_at, recipient_user_id from notifications
+                                 where source_id = ${a.caseId} order by id`
+
+  // Force the reconciliation write inside the transaction to fail.
+  await sql`alter table notifications add constraint z1_block check (type <> 'hearing') not valid`
+  try {
+    const res = await api('/api/assign', (await owner()), 'POST', { customerId: a.customerId, agentId: b.id })
+    assert.equal(res.status, 500, 'a reconciliation failure must not report success')
+    const body = await res.json().catch(() => ({}))
+    assert.ok(!/saved but/i.test(body.error || ''), 'must never claim the assignment was saved')
+
+    const [custAfter] = await sql`select agent_id from customers where id = ${a.customerId}`
+    const [caseAfter] = await sql`select agent_id from cases where id = ${a.caseId}`
+    const notifAfter = await sql`select id, cancelled_at, recipient_user_id from notifications
+                                  where source_id = ${a.caseId} order by id`
+    assert.equal(custAfter.agent_id, custBefore.agent_id, 'customers.agent_id must be unchanged')
+    assert.equal(caseAfter.agent_id, caseBefore.agent_id, 'cases.agent_id must be unchanged')
+    assert.equal(notifAfter.length, notifBefore.length, 'no notification rows added or removed')
+    assert.deepEqual(
+      notifAfter.map((n) => [n.id, n.cancelled_at?.toISOString() ?? null, n.recipient_user_id]),
+      notifBefore.map((n) => [n.id, n.cancelled_at?.toISOString() ?? null, n.recipient_user_id]),
+      'notifications must be byte-for-byte unchanged',
+    )
+  } finally {
+    await sql`alter table notifications drop constraint if exists z1_block`
+  }
+})
+
+test('Z2: a successful assignment moves reminders before the API returns, with no cron', async () => {
+  const cite = `Z2-${Date.now()}`
+  const a = await makeHearingCase({ email: `z2a-${Date.now()}@example.test`, hearingAt: new Date(Date.now() + 26 * 3600000).toISOString(), citation: cite })
+  await cron(CRON_SECRET)
+  await deliverNow(a.caseId, '%')
+  const [aRow] = await sql`select id from notifications where source_id = ${a.caseId}
+                            and recipient_user_id = ${a.userId} and cancelled_at is null limit 1`
+  assert.ok(aRow, 'Agent A holds an active reminder')
+
+  const bEmail = `z2b-${Date.now()}@example.test`
+  await ensureUser(bEmail, 'CASE_AGENT')
+  const [b] = await sql`select id from users where email = ${bEmail.toLowerCase()}`
+
+  const res = await api('/api/assign', (await owner()), 'POST', { customerId: a.customerId, agentId: b.id })
+  assert.equal(res.status, 200, await res.text())
+
+  // Asserted immediately after the 200, with NO cron run in between.
+  const [aAfter] = await sql`select cancelled_at from notifications where id = ${aRow.id}`
+  assert.ok(aAfter.cancelled_at, 'the former agent loses it before the API returns')
+  const [{ n: bCount }] = await sql`select count(*)::int n from notifications
+                                     where source_id = ${a.caseId} and recipient_user_id = ${b.id} and cancelled_at is null`
+  assert.ok(bCount > 0, 'the new agent already has reminders when the API returns')
+  const [caseRow] = await sql`select agent_id from cases where id = ${a.caseId}`
+  assert.equal(caseRow.agent_id, b.id, 'the case follows the customer assignment')
 })

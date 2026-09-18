@@ -1,44 +1,58 @@
-import Link from 'next/link'
-import { getSql } from '@/lib/db'
 import { getViewerScope } from '@/lib/ownership'
+import { getSql } from '@/lib/db'
 import NotAvailable from '../NotAvailable'
+import NotificationList from './NotificationList'
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
-const money = (n: number) => '$' + Number(n || 0).toLocaleString()
 
-export default async function Notifications() {
+/**
+ * Every authenticated recipient sees THEIR OWN persistent notifications:
+ * hearings, tasks, payments and documents. Rows are selected by
+ * recipient_user_id, so no user can see another's. Financial reminders only
+ * exist for roles with financial access, so no extra filtering is needed here.
+ */
+export default async function NotificationsPage() {
   const scope = await getViewerScope()
   if (!scope) return <NotAvailable />
-  if (!scope.showMoney) return <NotAvailable note="Financial alerts are limited to billing and management roles." />
-  const scoped = !scope.allMoney
-  const viewerId = scope.viewerId
+
   const sql = getSql()
-  const overdueFees = await sql<{ id: string; citation: string | null; official_no: string | null; customer_id: string; first_name: string; last_name: string; fee: string; paid: string; days: number }[]>`
-    select k.id, k.citation, k.official_no, k.customer_id, c.first_name, c.last_name, k.fee,
-      coalesce((select sum(p.amount) from payments p where p.case_id=k.id and p.status='Paid'),0) as paid,
-      greatest(0, extract(day from now() - coalesce(k.fee_since, k.created_at))::int) as days
-    from cases k join customers c on c.id=k.customer_id
-    where (${scoped} = false or k.agent_id = ${viewerId}) and k.fee is not null and k.fee > coalesce((select sum(p.amount) from payments p where p.case_id=k.id and p.status='Paid'),0)
-    order by days desc`
-  const unpaid = await sql<{ id: string; invoice: string | null; amount: string; customer_id: string; first_name: string; last_name: string }[]>`
-    select p.id, p.invoice, p.amount, p.customer_id, c.first_name, c.last_name from payments p join customers c on c.id=p.customer_id where (${scoped} = false or exists (select 1 from customers cc where cc.id = p.customer_id and cc.agent_id = ${viewerId})) and p.status in ('Pending','Overdue') order by p.paid_at desc`
-  const items = [
-    ...overdueFees.map((r) => ({ key: 'f' + r.id, tone: r.days > 20 ? 'rose' : 'amber', title: r.days > 20 ? `Overdue case payment (>20 days)` : 'Case balance due', body: `${r.first_name} ${r.last_name} owes ${money(Number(r.fee) - Number(r.paid))} for ${r.citation || r.official_no} · ${r.days} days`, href: `/customers/${r.customer_id}` })),
-    ...unpaid.map((r) => ({ key: 'u' + r.id, tone: 'amber', title: 'Unpaid invoice', body: `${r.first_name} ${r.last_name} · ${r.invoice || ''} · ${money(Number(r.amount))}`, href: `/customers/${r.customer_id}` })),
-  ]
+  const rows = await sql<{
+    id: string; type: string; priority: string; title: string; message: string
+    action_url: string | null; event_at: Date | null; scheduled_for: Date
+    read_at: Date | null; acknowledged_at: Date | null
+  }[]>`
+    select id, type, priority, title, message, action_url, event_at, scheduled_for,
+           read_at, acknowledged_at
+      from notifications
+     where recipient_user_id = ${scope.viewerId}
+       and cancelled_at is null and dismissed_at is null and delivery_status = 'delivered'
+     order by (priority = 'critical' and acknowledged_at is null) desc, scheduled_for desc
+     limit 200`
+
+  const [counts] = await sql<{ unread: number; critical: number }[]>`
+    select count(*) filter (where read_at is null)::int as unread,
+           count(*) filter (where priority = 'critical' and acknowledged_at is null)::int as critical
+      from notifications
+     where recipient_user_id = ${scope.viewerId}
+       and cancelled_at is null and dismissed_at is null and delivery_status = 'delivered'`
+
+  const items = rows.map((r) => ({
+    id: r.id, type: r.type, priority: r.priority, title: r.title, message: r.message,
+    action_url: r.action_url,
+    event_at: r.event_at ? new Date(r.event_at).toISOString() : null,
+    scheduled_for: new Date(r.scheduled_for).toISOString(),
+    read_at: r.read_at ? new Date(r.read_at).toISOString() : null,
+    acknowledged_at: r.acknowledged_at ? new Date(r.acknowledged_at).toISOString() : null,
+  }))
+
   return (
     <div>
-      <h1 className="text-xl font-semibold text-slate-900">Notifications</h1>
-      <p className="text-sm text-slate-500">Live alerts from your data (overdue balances &amp; unpaid invoices).</p>
-      <div className="mt-4 overflow-hidden rounded-xl border border-slate-200 bg-white">
-        {items.length === 0 && <div className="p-12 text-center text-sm text-slate-500">You&apos;re all caught up.</div>}
-        {items.map((n) => (
-          <Link key={n.key} href={n.href} className="flex items-start gap-3 border-b border-slate-50 px-5 py-3 hover:bg-slate-50">
-            <span className={'mt-1 inline-block h-2 w-2 rounded-full ' + (n.tone === 'rose' ? 'bg-brand-600' : 'bg-gold-500')} />
-            <div><p className="text-sm font-medium text-slate-800">{n.title}</p><p className="text-sm text-slate-500">{n.body}</p></div>
-          </Link>
-        ))}
-      </div>
+      <h1 className="text-xl font-bold text-slate-900">Notifications</h1>
+      <p className="text-sm text-slate-500">
+        {counts?.unread ?? 0} unread
+        {counts?.critical ? ` · ${counts.critical} awaiting acknowledgement` : ''}
+      </p>
+      <NotificationList items={items} />
     </div>
   )
 }

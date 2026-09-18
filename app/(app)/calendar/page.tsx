@@ -1,4 +1,5 @@
 import { getViewerScope } from '@/lib/ownership'
+import { resolveHearingTz } from '@/lib/hearing-time'
 import NotAvailable from '../NotAvailable'
 import Link from 'next/link'
 import { getSql } from '@/lib/db'
@@ -46,7 +47,7 @@ export default async function Calendar({ searchParams: searchParamsInput }: { se
     const isHearing = c.hearing_at != null || c.status === 'Hearing Scheduled'
     const anchor = c.hearing_at || c.next_action_at
     if (!anchor) return
-    const tz = c.hearing_at ? (c.hearing_tz || stateToTz(c.state)) : undefined
+    const tz = c.hearing_at ? resolveHearingTz(c.hearing_tz, c.state) : undefined
     const dt = new Date(anchor)
     const day = tz ? parseInt(new Intl.DateTimeFormat('en-US', { timeZone: tz, day: 'numeric' }).format(dt)) : dt.getDate()
     const time = tz
@@ -158,7 +159,7 @@ export default async function Calendar({ searchParams: searchParamsInput }: { se
             {agendaCases.map((k) => {
               const isHearing = k.hearing_at != null || k.status === 'Hearing Scheduled'
               const anchor = k.hearing_at || k.next_action_at!
-              const tz = k.hearing_at ? (k.hearing_tz || stateToTz(k.state)) : undefined
+              const tz = k.hearing_at ? resolveHearingTz(k.hearing_tz, k.state) : undefined
               const dt = new Date(anchor)
               const dateLabel = tz
                 ? new Intl.DateTimeFormat('en-US', { timeZone: tz, month: 'short', day: 'numeric' }).format(dt)

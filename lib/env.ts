@@ -37,3 +37,25 @@ export function authSecretKey(): Uint8Array {
 export function hasAuthSecret(): boolean {
   try { requireAuthSecret(); return true } catch { return false }
 }
+
+/**
+ * Scheduler secret. Fails closed: missing or short means the cron endpoint is
+ * unusable rather than open. The value is never logged or returned.
+ */
+export function requireCronSecret(): string {
+  const raw = process.env.CRON_SECRET
+  if (!raw || raw.trim().length < MIN_SECRET_LENGTH) {
+    throw new ConfigError(`CRON_SECRET must be set and at least ${MIN_SECRET_LENGTH} characters.`)
+  }
+  return raw
+}
+
+/** Constant-time comparison, so a wrong secret leaks nothing through timing. */
+export function timingSafeEqual(a: string, b: string): boolean {
+  const ab = new TextEncoder().encode(a)
+  const bb = new TextEncoder().encode(b)
+  if (ab.length !== bb.length) return false
+  let diff = 0
+  for (let i = 0; i < ab.length; i++) diff |= ab[i] ^ bb[i]
+  return diff === 0
+}

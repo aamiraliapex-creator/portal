@@ -101,3 +101,21 @@ export async function loadOwnedTask(
   if (scope.scoped && row.assignee_id !== scope.viewerId) return null
   return row
 }
+
+/**
+ * Document visibility policy.
+ *
+ * DOCUMENT_STAFF handles filing for the whole company, so granting it
+ * document.create/update while leaving it operationally scoped would make the
+ * permission unusable (it owns no customers). The documented choice is
+ * COMPANY-WIDE DOCUMENT ACCESS for DOCUMENT_STAFF, alongside management.
+ * CASE_AGENT remains restricted to documents for its assigned customers/cases.
+ */
+export function hasCompanyWideDocumentAccess(role: string): boolean {
+  return ['SUPER_ADMIN', 'ADMIN', 'MANAGER', 'DOCUMENT_STAFF'].includes(role)
+}
+
+/** True when the viewer must be restricted to their own customers' documents. */
+export function documentScopedFor(role: string): boolean {
+  return !hasCompanyWideDocumentAccess(role)
+}

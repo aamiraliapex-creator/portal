@@ -4,6 +4,7 @@ import { requirePermission, authzResponse } from '@/lib/auth-server'
 import { hashPassword, isWithinBcryptLimit, BCRYPT_MAX_BYTES } from '@/lib/password'
 import { canManageRole, isRole, isUserStatus, ROLE_RANK, type Role } from '@/lib/authz'
 import { revokeAllSessions } from '@/lib/sessions'
+import { reconcileForUser, reconcileCasesForAgent } from '@/lib/reminders'
 export const runtime = 'nodejs'
 
 const MIN_PASSWORD = 12
@@ -81,6 +82,10 @@ export async function PATCH(req: Request) {
       // Also revoke the individual session rows, so re-enabling the account
       // cannot resurrect pre-disable sessions or list them as active.
       await revokeAllSessions(id)
+      // Entitlement is gone: cancel reminder copies they may no longer receive.
+      try { await reconcileForUser(id) } catch (e) {
+        console.error('user reconciliation failed:', e instanceof Error ? e.message : 'error')
+      }
     } else {
       await sql`update users set status = ${status} where id = ${id}`
     }
@@ -106,6 +111,7 @@ export async function DELETE(req: Request) {
       return NextResponse.json({ error: 'You cannot delete a more privileged account.' }, { status: 403 })
     }
 
+    try { await reconcileCasesForAgent(id); await reconcileForUser(id) } catch { /* cron recovers */ }
     await sql`delete from users where id = ${id}`
     return NextResponse.json({ ok: true })
   } catch (e) { return authzResponse(e) ?? NextResponse.json({ error: 'Request failed.' }, { status: 500 }) }

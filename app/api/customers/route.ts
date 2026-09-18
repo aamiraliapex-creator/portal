@@ -57,10 +57,10 @@ export const POST = guarded('customer.create', async (req, actor) => {
   }
 
   const [row] = await sql<{ id: string }[]>`
-    insert into customers (approval_status, created_by, legacy_member_id, first_name, last_name, dob, email, phone, state, plan, pay_channel, cdl, license_no, dot, sub_status, next_payment, agent_id)
+    insert into customers (approval_status, created_by, legacy_member_id, first_name, last_name, dob, email, phone, state, plan, pay_channel, cdl, license_no, dot, sub_status, next_payment, next_payment_date, agent_id)
     values (${initialApprovalStatus(actor.role)}, ${actor.id}, ${'M-' + Math.floor(1000 + Math.random() * 9000)}, ${firstName.value}, ${lastName.value}, ${dob.value ?? null}, ${email.value ?? null}, ${phone.value ?? null}, ${state.value ?? null},
             ${plan.value ?? null}, ${payChannel.value ?? null}, ${cdl.value ?? 'No'}, ${licenseNo.value ?? null}, ${dot.value ?? 'No'},
-            ${subStatus.value ?? 'Active'}, ${nextPayment.value ?? null}, ${agentId})
+            ${subStatus.value ?? 'Active'}, ${nextPayment.value ?? null}, ${nextPayment.value ?? null}, ${agentId})
     returning id`
   return NextResponse.json({ ok: true, id: row.id })
 })

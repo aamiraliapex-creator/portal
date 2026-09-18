@@ -1,18 +1,29 @@
 'use client'
+import CourtTimezoneSelect from '../../CourtTimezoneSelect'
 import { useRouter } from 'next/navigation'
 import { useState } from 'react'
-import { stateToTz, localInputToUtcIso } from '@/lib/timezones'
+import { stateToTzStrict, localInputToUtcIso } from '@/lib/timezones'
 type Customer = { id: string; first_name: string; last_name: string; legacy_member_id?: string | null }
 export default function CaseForm({ customers, agents, showMoney = false }: { customers: Customer[]; agents: { id: string; name: string }[]; showMoney?: boolean }) {
   const router = useRouter()
-  const [f, setF] = useState({ customerId: customers[0]?.id || '', citation: '', officialNo: '', ticket: '', state: '', court: '', courtPhone: '', violationDate: '', cmv: 'Unknown', cdl: 'Unknown', fine: '', fee: '', agentId: '', priority: 'Normal', status: 'New', hearingAt: '', hearingType: 'In person', prepStatus: 'Not started' })
+  const [f, setF] = useState({ hearingTz: '', customerId: customers[0]?.id || '', citation: '', officialNo: '', ticket: '', state: '', court: '', courtPhone: '', violationDate: '', cmv: 'Unknown', cdl: 'Unknown', fine: '', fee: '', agentId: '', priority: 'Normal', status: 'New', hearingAt: '', hearingType: 'In person', prepStatus: 'Not started' })
   const [error, setError] = useState('')
   const set = (k: string, v: string) => setF((s) => ({ ...s, [k]: v }))
   async function submit(e: React.FormEvent) {
     e.preventDefault(); setError('')
     if (!f.customerId) { setError('Select a customer.'); return }
-    const hearingAt = f.hearingAt ? localInputToUtcIso(f.hearingAt, stateToTz(f.state)) : ''
-    const res = await fetch('/api/cases', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...f, hearingAt }) })
+    // The court timezone is explicit: the selector wins, a recognised state is
+    // only a suggestion, and there is no Pacific fallback.
+    const courtTz = f.hearingTz || stateToTzStrict(f.state) || ''
+    if (f.hearingAt && !courtTz) {
+      setError('Select a court timezone (or enter a recognised state) for the hearing date.')
+      return
+    }
+    const hearingAt = f.hearingAt ? localInputToUtcIso(f.hearingAt, courtTz) : ''
+    const res = await fetch('/api/cases', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...f, hearingAt, hearingTz: courtTz }),
+    })
     if (res.ok) { router.push('/cases'); router.refresh() } else { const d = await res.json().catch(()=>({})); setError(d.error || 'Could not save.') }
   }
   const custName = customers.find((c) => c.id === f.customerId)
@@ -59,6 +70,7 @@ export default function CaseForm({ customers, agents, showMoney = false }: { cus
           <p className="mb-3 text-[11px] font-bold uppercase tracking-wider text-brand-600">Hearing (optional)</p>
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
             <div><span className="lbl">Date &amp; time (court-local)</span><input type="datetime-local" value={f.hearingAt} onChange={(e)=>set('hearingAt',e.target.value)} className="inp" /></div>
+            <CourtTimezoneSelect value={f.hearingTz} onChange={(v)=>set('hearingTz',v)} suggested={stateToTzStrict(f.state)} />
             <div><span className="lbl">Type</span><select value={f.hearingType} onChange={(e)=>set('hearingType',e.target.value)} className="inp"><option>In person</option><option>Zoom</option><option>Phone</option></select></div>
             <div><span className="lbl">Prep status</span><select value={f.prepStatus} onChange={(e)=>set('prepStatus',e.target.value)} className="inp"><option>Not started</option><option>In progress</option><option>Ready</option></select></div>
           </div>

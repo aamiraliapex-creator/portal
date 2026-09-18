@@ -2,8 +2,10 @@ import { NextResponse } from 'next/server'
 import { getSql } from '@/lib/db'
 import { guarded } from '@/lib/auth-server'
 import { getViewerScope, loadOwnedCase } from '@/lib/ownership'
-import { stateToTz } from '@/lib/timezones'
+import { isValidTimeZone } from '@/lib/hearing-time'
+import { stateToTzStrict } from '@/lib/timezones'
 import { CASE_STATUSES, HEARING_TYPES, PREP_STATUSES, LIMITS, pickEnum, parseText, parseDate, firstError } from '@/lib/validation'
+import { reconcileCaseHearing } from '@/lib/reminders'
 export const runtime = 'nodejs'
 
 export const POST = guarded('case.update', async (req) => {
@@ -30,14 +32,50 @@ export const POST = guarded('case.update', async (req) => {
   if (!kase) return NextResponse.json({ error: 'Not available' }, { status: 404 })
 
   const sql = getSql()
-  const hearingTz = hearingAt.value ? stateToTz(state.value ?? kase.state) : null
-  await sql`
-    update cases set
-      hearing_at = ${hearingAt.value ?? null},
-      hearing_tz = ${hearingTz},
-      hearing_type = ${hearingType.value ?? 'In person'},
-      prep_status = ${prepStatus.value ?? 'Not started'},
-      status = ${status.value ?? 'Hearing Scheduled'}
-    where id = ${caseId}`
+
+  // A court date must never be stored with a silently-guessed timezone.
+  // Accept an explicitly selected valid IANA zone, otherwise require a
+  // RECOGNISED state. Nothing here falls back to Pacific.
+  let hearingTz: string | null = null
+  if (hearingAt.value) {
+    const supplied = typeof b.hearingTz === 'string' ? b.hearingTz.trim() : ''
+    if (supplied) {
+      if (!isValidTimeZone(supplied)) {
+        return NextResponse.json({ error: 'Select a valid court timezone.' }, { status: 400 })
+      }
+      hearingTz = supplied
+    } else {
+      const fromState = stateToTzStrict(state.value ?? kase.state)
+      if (!fromState) {
+        return NextResponse.json({
+          error: 'A recognised state or an explicitly selected court timezone is required for a hearing date.',
+        }, { status: 400 })
+      }
+      hearingTz = fromState
+    }
+  }
+
+  // The case update and the reminder reconciliation happen in ONE transaction.
+  // If reconciliation fails the case change is rolled back, so a 200 response
+  // always means obsolete reminders are no longer active.
+  try {
+    await sql.begin(async (tx) => {
+      await tx`
+        update cases set
+          hearing_at = ${hearingAt.value ?? null},
+          hearing_tz = ${hearingTz},
+          hearing_type = ${hearingType.value ?? 'In person'},
+          prep_status = ${prepStatus.value ?? 'Not started'},
+          status = ${status.value ?? 'Hearing Scheduled'}
+        where id = ${caseId}`
+      await reconcileCaseHearing(caseId, new Date(), tx as unknown as ReturnType<typeof getSql>)
+    })
+  } catch (e) {
+    console.error('hearing update rolled back:', e instanceof Error ? e.message : 'error')
+    return NextResponse.json(
+      { error: 'Could not update the hearing and its reminders. No changes were saved.' },
+      { status: 500 },
+    )
+  }
   return NextResponse.json({ ok: true })
 })

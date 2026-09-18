@@ -1,38 +1,112 @@
 'use client'
-import Link from 'next/link'
-import { useEffect, useRef, useState } from 'react'
-type Item = { title: string; body: string; href: string; tone: string }
+import { useCallback, useEffect, useState } from 'react'
+
+type Item = {
+  id: string; type: string; priority: string; title: string; message: string
+  action_url: string | null; read_at: string | null; acknowledged_at: string | null
+  scheduled_for: string
+}
+
+const ICON: Record<string, string> = { hearing: '⚖', task: '✓', payment: '$', document: '▤' }
+
 export default function NotificationBell() {
-  const [open, setOpen] = useState(false)
   const [items, setItems] = useState<Item[]>([])
-  const ref = useRef<HTMLDivElement>(null)
-  useEffect(() => { fetch('/api/notifications').then((r) => r.json()).then((d) => setItems(d.items || [])).catch(() => {}) }, [])
-  useEffect(() => {
-    function onDoc(e: MouseEvent) { if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false) }
-    document.addEventListener('mousedown', onDoc); return () => document.removeEventListener('mousedown', onDoc)
+  const [unread, setUnread] = useState(0)
+  const [critical, setCritical] = useState(0)
+  const [open, setOpen] = useState(false)
+  const [error, setError] = useState('')
+
+  const load = useCallback(async () => {
+    try {
+      const res = await fetch('/api/notifications')
+      if (!res.ok) { setError('Could not load notifications.'); return }
+      const d = await res.json()
+      setItems(d.items || []); setUnread(d.unread || 0); setCritical(d.criticalUnacknowledged || 0)
+      setError('')
+    } catch { setError('Could not load notifications.') }
   }, [])
+
+  useEffect(() => {
+    load()
+    const timer = setInterval(load, 60_000)
+    const onVisible = () => { if (document.visibilityState === 'visible') load() }
+    document.addEventListener('visibilitychange', onVisible)
+    return () => { clearInterval(timer); document.removeEventListener('visibilitychange', onVisible) }
+  }, [load])
+
+  async function act(action: string, id?: string) {
+    try {
+      const res = await fetch('/api/notifications', {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action, id }),
+      })
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({}))
+        setError(d.error || 'Action failed.')
+        return
+      }
+      setError(''); load()
+    } catch { setError('Action failed.') }
+  }
+
   return (
-    <div ref={ref} className="relative">
-      <button onClick={() => setOpen((o) => !o)} className="relative rounded-lg p-2 text-slate-500 hover:bg-slate-100" aria-label="Notifications">
-        <span className="text-lg">🔔</span>
-        {items.length > 0 && <span className="absolute -right-0.5 -top-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-brand-600 px-1 text-[10px] font-bold text-white">{items.length > 99 ? '99+' : items.length}</span>}
+    <div className="relative">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        aria-label={`Notifications: ${unread} unread${critical ? `, ${critical} needing acknowledgement` : ''}`}
+        aria-expanded={open}
+        className="relative rounded-full p-2 hover:bg-slate-100"
+      >
+        <span aria-hidden="true">🔔</span>
+        {unread > 0 && (
+          <span className={'absolute -right-0.5 -top-0.5 rounded-full px-1.5 text-[10px] font-bold text-white ' + (critical > 0 ? 'bg-brand-600' : 'bg-slate-500')}>
+            {unread}
+          </span>
+        )}
       </button>
+
       {open && (
-        <div className="absolute right-0 z-50 mt-2 w-96 max-w-[92vw] overflow-hidden rounded-xl border border-slate-200 bg-white shadow-2xl">
-          <div className="flex items-center justify-between border-b border-slate-100 px-4 py-3">
-            <p className="text-sm font-semibold text-slate-900">Notifications</p>
-            <span className="text-xs font-semibold text-brand-600">{items.length} new</span>
+        <div role="dialog" aria-label="Notifications" className="absolute right-0 z-50 mt-2 w-96 rounded-xl border border-slate-200 bg-white shadow-lg">
+          <div className="flex items-center justify-between border-b border-slate-100 px-4 py-2">
+            <p className="text-sm font-semibold text-slate-700">Notifications</p>
+            <button onClick={() => act('read-all')} className="text-xs font-semibold text-brand-600">Mark all read</button>
           </div>
-          <div className="max-h-96 overflow-y-auto">
-            {items.length === 0 && <p className="p-8 text-center text-sm text-slate-500">You&apos;re all caught up.</p>}
-            {items.map((n, i) => (
-              <Link key={i} href={n.href} onClick={() => setOpen(false)} className="flex gap-3 border-b border-slate-50 px-4 py-3 hover:bg-slate-50">
-                <span className={'mt-1 inline-block h-2 w-2 shrink-0 rounded-full ' + (n.tone === 'rose' ? 'bg-brand-600' : 'bg-gold-500')} />
-                <div><p className="text-sm font-medium text-slate-800">{n.title}</p><p className="text-xs text-slate-500">{n.body}</p></div>
-              </Link>
-            ))}
+          {error && <p role="alert" className="px-4 py-2 text-xs text-brand-700">{error}</p>}
+          <div className="max-h-96 overflow-y-auto divide-y divide-slate-50">
+            {items.length === 0 && <p className="px-4 py-8 text-center text-sm text-slate-500">Nothing to show.</p>}
+            {items.map((n) => {
+              const needsAck = n.priority === 'critical' && !n.acknowledged_at
+              return (
+                <div key={n.id} className={'px-4 py-3 text-sm ' + (needsAck ? 'bg-brand-50/60' : !n.read_at ? 'bg-slate-50' : '')}>
+                  <div className="flex items-start gap-2">
+                    <span aria-hidden="true">{ICON[n.type] || '•'}</span>
+                    <div className="flex-1">
+                      <p className="font-medium text-slate-800">
+                        {n.title}
+                        {needsAck && <span className="badge ml-2 bg-brand-100 text-brand-700">Needs acknowledgement</span>}
+                        {!n.read_at && !needsAck && <span className="badge ml-2 bg-slate-100 text-slate-600">Unread</span>}
+                      </p>
+                      <p className="whitespace-pre-line text-xs text-slate-600">{n.message}</p>
+                      {n.message.includes('TIMEZONE NEEDS REVIEW') && (
+                        <p role="alert" className="mt-1 text-[11px] font-semibold text-brand-700">Verify the court timezone immediately.</p>
+                      )}
+                      {n.acknowledged_at && (
+                        <p className="mt-1 text-[11px] text-emerald-700">
+                          Acknowledged {new Date(n.acknowledged_at).toLocaleString()}
+                        </p>
+                      )}
+                      <div className="mt-2 flex flex-wrap gap-2">
+                        {n.action_url && <a href={n.action_url} className="chip">Open</a>}
+                        {needsAck && <button onClick={() => act('acknowledge', n.id)} className="chip text-brand-700">Acknowledge</button>}
+                        {!n.read_at && <button onClick={() => act('read', n.id)} className="chip">Mark read</button>}
+                        {!needsAck && <button onClick={() => act('dismiss', n.id)} className="chip">Dismiss</button>}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )
+            })}
           </div>
-          <Link href="/notifications" onClick={() => setOpen(false)} className="block border-t border-slate-100 px-4 py-2.5 text-center text-sm font-semibold text-brand-600 hover:bg-slate-50">View all notifications</Link>
         </div>
       )}
     </div>

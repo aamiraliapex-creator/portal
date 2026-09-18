@@ -31,12 +31,26 @@ const NAME_TO_ABBR: Record<string, string> = {
 export const DEFAULT_TZ = 'America/Los_Angeles'
 export const OFFICE_TZ = 'America/New_York'
 
-export function stateToTz(state?: string | null): string {
-  if (!state) return DEFAULT_TZ
+/**
+ * Strict lookup: returns null for null, blank, unknown or misspelled input.
+ * Court times must never be silently labelled Pacific because a state was
+ * unrecognised, so nothing here falls back to a default.
+ */
+export function stateToTzStrict(state?: string | null): string | null {
+  if (typeof state !== 'string') return null
   const s = state.trim()
-  if (s.length === 2) return STATE_TZ[s.toUpperCase()] || DEFAULT_TZ
+  if (s === '') return null
+  if (s.length === 2) return STATE_TZ[s.toUpperCase()] ?? null
   const abbr = NAME_TO_ABBR[s.toLowerCase()]
-  return (abbr && STATE_TZ[abbr]) || DEFAULT_TZ
+  return (abbr && STATE_TZ[abbr]) || null
+}
+
+/**
+ * Legacy helper kept for non-hearing display callers that expect a value.
+ * Prefer stateToTzStrict() anywhere correctness matters.
+ */
+export function stateToTz(state?: string | null): string {
+  return stateToTzStrict(state) ?? DEFAULT_TZ
 }
 
 const TZ_ABBR: Record<string, string> = {
